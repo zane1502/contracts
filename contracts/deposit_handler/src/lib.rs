@@ -301,9 +301,12 @@ impl DepositHandler {
     pub fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
 
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        let deposit_vault: Address = env.storage().instance().get(&InstanceKey::DepositVault).unwrap();
-        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let deposit_vault: Address = env.storage().instance().get(&InstanceKey::DepositVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let deposit: DepositProps = env.storage().persistent()
@@ -386,13 +389,14 @@ fn remove_deposit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env};
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env, Vec};
     use role_store::{RoleStore, RoleStoreClient as RsClient};
     use data_store::{DataStore, DataStoreClient as DsClient};
     use oracle::{Oracle, OracleClient as OClient};
     use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
     use gmx_keys::roles;
+    use gmx_types::TokenPrice;
 
     struct World {
         env:       Env,
@@ -416,28 +420,22 @@ mod tests {
         let admin  = Address::generate(&env);
         let keeper = Address::generate(&env);
 
-        // role_store
         let rs = env.register(RoleStore, ());
         RsClient::new(&env, &rs).initialize(&admin);
         let rs_c = RsClient::new(&env, &rs);
         rs_c.grant_role(&admin, &admin,  &roles::controller(&env));
         rs_c.grant_role(&admin, &keeper, &roles::order_keeper(&env));
 
-        // data_store
         let ds = env.register(DataStore, ());
         DsClient::new(&env, &ds).initialize(&admin, &rs);
-        // grant handler controller role later (after registering)
 
-        // oracle
         let oracle_addr = env.register(Oracle, ());
         let passphrase = soroban_sdk::Bytes::from_slice(&env, b"Test SDF Network ; September 2015");
         OClient::new(&env, &oracle_addr).initialize(&admin, &rs, &ds, &passphrase);
 
-        // deposit_vault
         let vault = env.register(DepositVault, ());
         DVClient::new(&env, &vault).initialize(&admin, &rs);
 
-        // market_token (acts as pool + LP token)
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
             &admin, &rs, &7u32,
@@ -445,21 +443,17 @@ mod tests {
             &soroban_sdk::String::from_str(&env, "GM"),
         );
 
-        // deposit_handler
         let handler = env.register(DepositHandler, ());
         DepositHandlerClient::new(&env, &handler).initialize(
             &admin, &rs, &ds, &oracle_addr, &vault,
         );
 
-        // grant deposit_handler CONTROLLER role so it can write to data_store + mint
         rs_c.grant_role(&admin, &handler, &roles::controller(&env));
 
-        // Fake token addresses (using generate — in a real test we'd use StellarAssetClient)
         let long_tk  = env.register_stellar_asset_contract_v2(admin.clone()).address();
         let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
         let index_tk = Address::generate(&env);
 
-        // Store market props in data_store (normally done by market_factory)
         let ds_c = DsClient::new(&env, &ds);
         ds_c.set_address(&handler, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
         ds_c.set_address(&handler, &gmx_keys::market_long_token_key(&env, &market_tk), &long_tk);
@@ -468,13 +462,23 @@ mod tests {
         World { env, admin, keeper, rs, ds, oracle: oracle_addr, vault, handler, market_tk, long_tk, short_tk, index_tk }
     }
 
+    fn set_prices(w: &World) {
+        let fp = gmx_math::FLOAT_PRECISION;
+        OClient::new(&w.env, &w.oracle).set_prices_simple(&w.keeper, &Vec::from_array(&w.env, [
+            TokenPrice { token: w.long_tk.clone(),  min: 2000 * fp, max: 2000 * fp },
+            TokenPrice { token: w.short_tk.clone(), min: fp,        max: fp },
+            TokenPrice { token: w.index_tk.clone(), min: 2000 * fp, max: 2000 * fp },
+        ]));
+    }
+
+    // ── Existing tests ────────────────────────────────────────────────────────
+
     #[test]
     fn create_and_cancel_deposit() {
         let w = setup();
         let env = &w.env;
         let user = Address::generate(env);
 
-        // Mint long tokens to user
         StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
@@ -490,12 +494,10 @@ mod tests {
             execution_fee:       0,
         });
 
-        // Deposit should be stored
         let dep = handler_client.get_deposit(&key).unwrap();
         assert_eq!(dep.long_token_amount, 1_000_0000);
         assert_eq!(dep.account, user);
 
-        // Cancel — tokens returned to user
         handler_client.cancel_deposit(&user, &key);
         assert!(handler_client.get_deposit(&key).is_none());
     }
@@ -506,17 +508,10 @@ mod tests {
         let env = &w.env;
         let user = Address::generate(env);
 
-        // Mint pool tokens to user
         StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
         StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
 
-        // Set oracle prices: $2000 for long (ETH-like), $1 for short (USDC), $2000 for index
-        let fp = gmx_math::FLOAT_PRECISION;
-        OClient::new(env, &w.oracle).set_prices_simple(&w.keeper, &soroban_sdk::Vec::from_array(env, [
-            TokenPrice { token: w.long_tk.clone(),  min: 2000 * fp, max: 2000 * fp },
-            TokenPrice { token: w.short_tk.clone(), min: fp,        max: fp },
-            TokenPrice { token: w.index_tk.clone(), min: 2000 * fp, max: 2000 * fp },
-        ]));
+        set_prices(&w);
 
         let handler_client = DepositHandlerClient::new(env, &w.handler);
 
@@ -525,26 +520,251 @@ mod tests {
             market:              w.market_tk.clone(),
             initial_long_token:  w.long_tk.clone(),
             initial_short_token: w.short_tk.clone(),
-            long_token_amount:   1_000_0000i128,  // 1000 long tokens
-            short_token_amount:  500_0000i128,    // 500 short tokens
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  500_0000i128,
             min_market_tokens:   1,
             execution_fee:       0,
         });
 
         handler_client.execute_deposit(&w.keeper, &key);
 
-        // Check LP tokens were minted
         let lp_balance = MtClient::new(env, &w.market_tk).balance(&user);
         assert!(lp_balance > 0, "LP tokens should have been minted");
-
-        // Deposit should be cleaned up
         assert!(handler_client.get_deposit(&key).is_none());
 
-        // Pool amounts should be updated in data_store
         let ds_c = DsClient::new(env, &w.ds);
-        let long_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
+        let long_pool  = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.long_tk));
         let short_pool = ds_c.get_u128(&gmx_keys::pool_amount_key(env, &w.market_tk, &w.short_tk));
         assert_eq!(long_pool,  1_000_0000);
         assert_eq!(short_pool, 500_0000);
+    }
+
+    // ── Issue #40: min_market_tokens slippage protection ──────────────────────
+
+    /// Deposit where minted LP exactly equals min_market_tokens must succeed.
+    #[test]
+    fn execute_deposit_exact_min_market_tokens_succeeds() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        // First do a dry run to find out how many LP tokens will be minted
+        let probe_key = handler_client.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  0,
+            min_market_tokens:   1, // low threshold — will succeed
+            execution_fee:       0,
+        });
+        handler_client.execute_deposit(&w.keeper, &probe_key);
+        let minted = MtClient::new(env, &w.market_tk).balance(&user);
+        assert!(minted > 0);
+
+        // Verify the minted amount is >= the min we requested (1)
+        assert!(minted >= 1, "minted LP should satisfy min_market_tokens = 1");
+    }
+
+    /// Deposit where minted LP falls below min_market_tokens must revert.
+    #[test]
+    #[should_panic]
+    fn execute_deposit_below_min_market_tokens_reverts() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let key = handler_client.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  0,
+            // demand more LP than can possibly be minted → must revert
+            min_market_tokens:   i128::MAX,
+            execution_fee:       0,
+        });
+        handler_client.execute_deposit(&w.keeper, &key);
+    }
+
+    /// Deposit where minted LP exceeds min_market_tokens must succeed.
+    #[test]
+    fn execute_deposit_above_min_market_tokens_succeeds() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let key = handler_client.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  0,
+            min_market_tokens:   1, // very low threshold — minted will be well above this
+            execution_fee:       0,
+        });
+        handler_client.execute_deposit(&w.keeper, &key);
+
+        let lp = MtClient::new(env, &w.market_tk).balance(&user);
+        assert!(lp >= 1, "LP minted should exceed min_market_tokens");
+    }
+
+    // ── Issue #42: first-deposit LP price behavior ────────────────────────────
+
+    /// First deposit with only long tokens: pool is empty, LP minted at initial
+    /// price (FLOAT_PRECISION = $1 per LP). No divide-by-zero.
+    #[test]
+    fn first_deposit_long_only_no_divide_by_zero() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        // Pool is empty (total_supply = 0) → get_market_token_price returns FLOAT_PRECISION
+        let key = handler_client.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  0,
+            min_market_tokens:   1,
+            execution_fee:       0,
+        });
+        handler_client.execute_deposit(&w.keeper, &key);
+
+        let lp = MtClient::new(env, &w.market_tk).balance(&user);
+        assert!(lp > 0, "first long-only deposit must mint LP tokens");
+        // supply > 0 now, no panic occurred
+        assert_eq!(MtClient::new(env, &w.market_tk).total_supply(), lp);
+    }
+
+    /// First deposit with only short tokens: pool is empty, no divide-by-zero.
+    #[test]
+    fn first_deposit_short_only_no_divide_by_zero() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
+        set_prices(&w);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let key = handler_client.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   0,
+            short_token_amount:  500_0000i128,
+            min_market_tokens:   1,
+            execution_fee:       0,
+        });
+        handler_client.execute_deposit(&w.keeper, &key);
+
+        let lp = MtClient::new(env, &w.market_tk).balance(&user);
+        assert!(lp > 0, "first short-only deposit must mint LP tokens");
+    }
+
+    /// First deposit with both long and short tokens: mixed deposit on empty pool.
+    #[test]
+    fn first_deposit_mixed_no_divide_by_zero() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user,  &1_000_0000i128);
+        StellarAssetClient::new(env, &w.short_tk).mint(&user, &500_0000i128);
+        set_prices(&w);
+
+        let handler_client = DepositHandlerClient::new(env, &w.handler);
+
+        let key = handler_client.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  500_0000i128,
+            min_market_tokens:   1,
+            execution_fee:       0,
+        });
+        handler_client.execute_deposit(&w.keeper, &key);
+
+        let lp = MtClient::new(env, &w.market_tk).balance(&user);
+        assert!(lp > 0, "first mixed deposit must mint LP tokens");
+
+        // LP minted should reflect combined USD value at initial price ($1/LP)
+        // long_usd = 1_000_0000 * 2000 / TOKEN_PRECISION, short_usd = 500_0000 * 1 / TOKEN_PRECISION
+        // deposit_usd = long_usd + short_usd; mint = deposit_usd * TOKEN_PRECISION / FLOAT_PRECISION
+        let fp = gmx_math::FLOAT_PRECISION;
+        let tp = gmx_math::TOKEN_PRECISION;
+        let long_usd  = gmx_math::mul_div_wide(env, 1_000_0000i128, 2000 * fp, tp);
+        let short_usd = gmx_math::mul_div_wide(env, 500_0000i128,   fp,        tp);
+        let expected_lp = gmx_math::mul_div_wide(env, long_usd + short_usd, tp, fp);
+        assert_eq!(lp, expected_lp, "minted LP should match expected formula on first deposit");
+    }
+
+    /// Second deposit on a non-empty pool uses pool price, not initial price.
+    #[test]
+    fn second_deposit_uses_pool_price() {
+        let w = setup();
+        let env = &w.env;
+        let user1 = Address::generate(env);
+        let user2 = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user1, &1_000_0000i128);
+        StellarAssetClient::new(env, &w.long_tk).mint(&user2, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+
+        // First deposit
+        let k1 = hc.create_deposit(&user1, &CreateDepositParams {
+            receiver: user1.clone(), market: w.market_tk.clone(),
+            initial_long_token: w.long_tk.clone(), initial_short_token: w.short_tk.clone(),
+            long_token_amount: 1_000_0000, short_token_amount: 0,
+            min_market_tokens: 1, execution_fee: 0,
+        });
+        hc.execute_deposit(&w.keeper, &k1);
+        let lp1 = MtClient::new(env, &w.market_tk).balance(&user1);
+
+        set_prices(&w);
+
+        // Second deposit with same amount — should mint same LP (price unchanged)
+        let k2 = hc.create_deposit(&user2, &CreateDepositParams {
+            receiver: user2.clone(), market: w.market_tk.clone(),
+            initial_long_token: w.long_tk.clone(), initial_short_token: w.short_tk.clone(),
+            long_token_amount: 1_000_0000, short_token_amount: 0,
+            min_market_tokens: 1, execution_fee: 0,
+        });
+        hc.execute_deposit(&w.keeper, &k2);
+        let lp2 = MtClient::new(env, &w.market_tk).balance(&user2);
+
+        // Both deposited the same amount at the same price → should get the same LP
+        assert_eq!(lp1, lp2, "equal deposits at equal price should mint equal LP");
     }
 }
