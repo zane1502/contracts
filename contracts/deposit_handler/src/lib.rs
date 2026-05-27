@@ -84,6 +84,7 @@ trait IDataStore {
     fn remove_address_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: Address);
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
+    fn contains_bytes32(env: Env, set_key: BytesN<32>, value: BytesN<32>) -> bool;
     fn increment_nonce(env: Env, caller: Address) -> u64;
 }
 
@@ -738,6 +739,76 @@ mod tests {
         let short_usd = gmx_math::mul_div_wide(env, 500_0000i128,   fp,        tp);
         let expected_lp = gmx_math::mul_div_wide(env, long_usd + short_usd, tp, fp);
         assert_eq!(lp, expected_lp, "minted LP should match expected formula on first deposit");
+    }
+
+    // ── Issue #32: storage cleanup ────────────────────────────────────────────
+
+    /// After cancel_deposit, the record must be gone from local storage AND from
+    /// both the global and per-account deposit lists in data_store.
+    #[test]
+    fn cancel_deposit_cleans_up_storage_and_lists() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        let key = hc.create_deposit(&user, &CreateDepositParams {
+            receiver: user.clone(), market: w.market_tk.clone(),
+            initial_long_token: w.long_tk.clone(), initial_short_token: w.short_tk.clone(),
+            long_token_amount: 1_000_0000i128, short_token_amount: 0,
+            min_market_tokens: 0, execution_fee: 0,
+        });
+
+        // must exist before cancel
+        assert!(hc.get_deposit(&key).is_some());
+        assert!(ds_c.contains_bytes32(&gmx_keys::deposit_list_key(env), &key));
+        assert!(ds_c.contains_bytes32(&gmx_keys::account_deposit_list_key(env, &user), &key));
+
+        hc.cancel_deposit(&user, &key);
+
+        // must be fully gone — no stale records
+        assert!(hc.get_deposit(&key).is_none(), "record must be removed after cancel");
+        assert!(!ds_c.contains_bytes32(&gmx_keys::deposit_list_key(env), &key),
+            "global deposit list must not contain key after cancel");
+        assert!(!ds_c.contains_bytes32(&gmx_keys::account_deposit_list_key(env, &user), &key),
+            "account deposit list must not contain key after cancel");
+    }
+
+    /// After execute_deposit, the record must be gone from local storage AND from
+    /// both the global and per-account deposit lists in data_store.
+    #[test]
+    fn execute_deposit_cleans_up_storage_and_lists() {
+        let w = setup();
+        let env = &w.env;
+        let user = Address::generate(env);
+
+        StellarAssetClient::new(env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let ds_c = DsClient::new(env, &w.ds);
+
+        let key = hc.create_deposit(&user, &CreateDepositParams {
+            receiver: user.clone(), market: w.market_tk.clone(),
+            initial_long_token: w.long_tk.clone(), initial_short_token: w.short_tk.clone(),
+            long_token_amount: 1_000_0000i128, short_token_amount: 0,
+            min_market_tokens: 1, execution_fee: 0,
+        });
+
+        assert!(hc.get_deposit(&key).is_some());
+        assert!(ds_c.contains_bytes32(&gmx_keys::deposit_list_key(env), &key));
+        assert!(ds_c.contains_bytes32(&gmx_keys::account_deposit_list_key(env, &user), &key));
+
+        hc.execute_deposit(&w.keeper, &key);
+
+        // must be fully gone — no stale records
+        assert!(hc.get_deposit(&key).is_none(), "record must be removed after execute");
+        assert!(!ds_c.contains_bytes32(&gmx_keys::deposit_list_key(env), &key),
+            "global deposit list must not contain key after execute");
+        assert!(!ds_c.contains_bytes32(&gmx_keys::account_deposit_list_key(env, &user), &key),
+            "account deposit list must not contain key after execute");
     }
 
     /// Second deposit on a non-empty pool uses pool price, not initial price.
