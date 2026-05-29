@@ -354,4 +354,21 @@ mod tests {
         let markets = client.get_markets(&0, &10);
         assert_eq!(markets.len(), 0);
     }
+
+    // ── Issue #109: MARKET_KEEPER authorization matrix ────────────────────────
+
+    /// create_market must reject a caller that does not hold MARKET_KEEPER.
+    #[test]
+    #[should_panic]
+    fn create_market_by_non_market_keeper_panics() {
+        let (env, _admin, _rs, _ds, factory_id) = setup();
+        let impostor = Address::generate(&env);
+        // impostor was never granted MARKET_KEEPER — must panic with Unauthorized.
+        let client = MarketFactoryClient::new(&env, &factory_id);
+        let index_tk = Address::generate(&env);
+        let long_tk  = Address::generate(&env);
+        let short_tk = Address::generate(&env);
+        let mt = soroban_sdk::String::from_str(&env, "swap");
+        client.create_market(&impostor, &index_tk, &long_tk, &short_tk, &mt);
+    }
 }

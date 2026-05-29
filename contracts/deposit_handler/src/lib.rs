@@ -1284,4 +1284,119 @@ mod tests {
         let lp = MtClient::new(env, &w.market_tk).balance(&user);
         assert!(lp > 0, "LP tokens should be minted and event published");
     }
+
+    // ── Issue #109: ORDER_KEEPER authorization matrix ─────────────────────────
+
+    /// execute_deposit must reject a caller that does not hold ORDER_KEEPER.
+    #[test]
+    #[should_panic]
+    fn execute_deposit_by_non_keeper_panics() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let key = DepositHandlerClient::new(&w.env, &w.handler).create_deposit(
+            &user,
+            &CreateDepositParams {
+                receiver:            user.clone(),
+                market:              w.market_tk.clone(),
+                initial_long_token:  w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount:   1_000_0000,
+                short_token_amount:  0,
+                min_market_tokens:   1,
+                execution_fee:       0,
+            },
+        );
+
+        // impostor has no ORDER_KEEPER role — execute_deposit must panic.
+        let impostor = Address::generate(&w.env);
+        DepositHandlerClient::new(&w.env, &w.handler).execute_deposit(&impostor, &key);
+    }
+
+    // ── Issue #110: upgrade smoke tests ───────────────────────────────────────
+
+    /// Admin can upgrade; instance storage is preserved across the wasm swap.
+    #[test]
+    fn upgrade_admin_succeeds() {
+        let w = setup(); // mock_all_auths active
+        let dummy_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let new_hash = w.env.deployer().upload_contract_wasm(
+            soroban_sdk::Bytes::from_slice(&w.env, &dummy_wasm),
+        );
+        DepositHandlerClient::new(&w.env, &w.handler).upgrade(&new_hash);
+
+        // Admin must still be readable from instance storage.
+        let admin_after: Address = w.env.as_contract(&w.handler, || {
+            w.env.storage().instance().get(&InstanceKey::Admin).unwrap()
+        });
+        assert_eq!(admin_after, w.admin);
+    }
+
+    /// Calling upgrade without the admin's authorisation must revert.
+    #[test]
+    #[should_panic]
+    fn upgrade_non_admin_reverts() {
+        // Fresh env — no mock_all_auths so require_auth() is not bypassed.
+        let env = Env::default();
+        let admin   = Address::generate(&env);
+        let rs      = Address::generate(&env);
+        let ds      = Address::generate(&env);
+        let oracle  = Address::generate(&env);
+        let vault   = Address::generate(&env);
+
+        let handler = env.register(DepositHandler, ());
+        env.as_contract(&handler, || {
+            env.storage().instance().set(&InstanceKey::Initialized,  &true);
+            env.storage().instance().set(&InstanceKey::Admin,        &admin);
+            env.storage().instance().set(&InstanceKey::RoleStore,    &rs);
+            env.storage().instance().set(&InstanceKey::DataStore,    &ds);
+            env.storage().instance().set(&InstanceKey::Oracle,       &oracle);
+            env.storage().instance().set(&InstanceKey::DepositVault, &vault);
+        });
+
+        // No auth context — must panic at admin.require_auth().
+        let dummy_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let new_hash = env.deployer().upload_contract_wasm(
+            soroban_sdk::Bytes::from_slice(&env, &dummy_wasm),
+        );
+        DepositHandlerClient::new(&env, &handler).upgrade(&new_hash);
+    }
+
+    /// Deposit keys written to persistent storage before upgrade must be readable after.
+    #[test]
+    fn upgrade_preserves_deposit_storage() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&user, &1_000_0000i128);
+        set_prices(&w);
+
+        let hc = DepositHandlerClient::new(&w.env, &w.handler);
+        let key = hc.create_deposit(&user, &CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000,
+            short_token_amount:  0,
+            min_market_tokens:   1,
+            execution_fee:       0,
+        });
+
+        assert!(hc.get_deposit(&key).is_some(), "deposit must exist before upgrade");
+
+        // Upgrade with a registered WASM.
+        let dummy_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let new_hash = w.env.deployer().upload_contract_wasm(
+            soroban_sdk::Bytes::from_slice(&w.env, &dummy_wasm),
+        );
+        hc.upgrade(&new_hash);
+
+        // Deposit key must still be readable from persistent storage.
+        assert!(
+            hc.get_deposit(&key).is_some(),
+            "deposit must still be readable after upgrade"
+        );
+    }
 }

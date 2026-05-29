@@ -334,4 +334,87 @@ mod tests {
             .claim_funding_fees(&w.admin, &w.market_tk, &w.long_tk);
         assert_eq!(claimed, 0, "claim_funding_fees must return 0 when nothing is claimable");
     }
+
+    // ── Issue #109: FEE_KEEPER authorization matrix ───────────────────────────
+
+    /// claim_fees must reject a caller that does not hold FEE_KEEPER.
+    #[test]
+    #[should_panic]
+    fn claim_fees_by_non_fee_keeper_panics() {
+        let w = setup();
+        let impostor = Address::generate(&w.env);
+        // impostor has no FEE_KEEPER role — must panic with Unauthorized.
+        FeeHandlerClient::new(&w.env, &w.handler)
+            .claim_fees(&impostor, &w.market_tk, &w.long_tk, &w.admin);
+    }
+
+    // ── Issue #110: upgrade smoke tests ───────────────────────────────────────
+
+    /// Admin can upgrade; instance storage survives the wasm swap.
+    #[test]
+    fn upgrade_admin_succeeds() {
+        let w = setup();
+        let dummy_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let new_hash = w.env.deployer().upload_contract_wasm(
+            soroban_sdk::Bytes::from_slice(&w.env, &dummy_wasm),
+        );
+        FeeHandlerClient::new(&w.env, &w.handler).upgrade(&new_hash);
+
+        let admin_after: Address = w.env.as_contract(&w.handler, || {
+            w.env.storage().instance().get(&InstanceKey::Admin).unwrap()
+        });
+        assert_eq!(admin_after, w.admin);
+    }
+
+    /// Calling upgrade without the admin's authorisation must revert.
+    #[test]
+    #[should_panic]
+    fn upgrade_non_admin_reverts() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let rs    = Address::generate(&env);
+        let ds    = Address::generate(&env);
+
+        let handler = env.register(FeeHandler, ());
+        env.as_contract(&handler, || {
+            env.storage().instance().set(&InstanceKey::Initialized, &true);
+            env.storage().instance().set(&InstanceKey::Admin,       &admin);
+            env.storage().instance().set(&InstanceKey::RoleStore,   &rs);
+            env.storage().instance().set(&InstanceKey::DataStore,   &ds);
+        });
+
+        // No auth context — must panic at admin.require_auth().
+        let dummy_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let new_hash = env.deployer().upload_contract_wasm(
+            soroban_sdk::Bytes::from_slice(&env, &dummy_wasm),
+        );
+        FeeHandlerClient::new(&env, &handler).upgrade(&new_hash);
+    }
+
+    /// DataStore fee entries written before upgrade remain claimable after.
+    #[test]
+    fn upgrade_preserves_fee_storage_and_claim_works() {
+        let w = setup();
+        let fee_amount: u128 = ONE_TOKEN as u128 * 5;
+
+        // Seed claimable fees in DataStore.
+        let claim_key = gmx_keys::claimable_fee_amount_key(&w.env, &w.market_tk, &w.long_tk);
+        DsClient::new(&w.env, &w.ds).set_u128(&w.handler, &claim_key, &fee_amount);
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&w.market_tk, &(fee_amount as i128));
+
+        // Upgrade.
+        let dummy_wasm = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let new_hash = w.env.deployer().upload_contract_wasm(
+            soroban_sdk::Bytes::from_slice(&w.env, &dummy_wasm),
+        );
+        FeeHandlerClient::new(&w.env, &w.handler).upgrade(&new_hash);
+
+        // claim_fees must still work — fee is still in DataStore.
+        let receiver = Address::generate(&w.env);
+        FeeHandlerClient::new(&w.env, &w.handler)
+            .claim_fees(&w.keeper, &w.market_tk, &w.long_tk, &receiver);
+
+        let bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&receiver);
+        assert_eq!(bal as u128, fee_amount, "full fee must be claimable after upgrade");
+    }
 }

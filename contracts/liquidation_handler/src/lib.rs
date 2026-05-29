@@ -638,4 +638,24 @@ mod tests {
             "position key must be gone after post-upgrade liquidation"
         );
     }
+
+    // ── Issue #109: LIQUIDATION_KEEPER authorization matrix ──────────────────
+
+    /// liquidate_position must reject a caller that does not hold LIQUIDATION_KEEPER.
+    #[test]
+    #[should_panic]
+    fn liquidate_position_by_non_liq_keeper_panics() {
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        open_long_position(&w, ONE_TOKEN, 20_000 * fp);
+
+        // Crash the price so the position is liquidatable.
+        set_prices(&w, 100 * fp);
+
+        let impostor = Address::generate(&w.env);
+        // impostor has no LIQUIDATION_KEEPER role — must panic with Unauthorized.
+        LiquidationHandlerClient::new(&w.env, &w.liq_handler)
+            .liquidate_position(&impostor, &w.user, &w.market_tk, &w.long_tk, &true);
+    }
 }

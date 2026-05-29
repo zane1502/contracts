@@ -840,4 +840,31 @@ mod tests {
         assert_eq!(MtClient::new(env, &w.market_tk).balance(&user), lp_balance);
         assert!(WithdrawalHandlerClient::new(env, &w.wth_handler).get_withdrawal(&wth_key).is_none());
     }
+
+    // ── Issue #109: ORDER_KEEPER authorization matrix ─────────────────────────
+
+    /// execute_withdrawal must reject a caller that does not hold ORDER_KEEPER.
+    #[test]
+    #[should_panic]
+    fn execute_withdrawal_by_non_keeper_panics() {
+        let w = setup();
+        let user = Address::generate(&w.env);
+        let lp_balance = provide_liquidity(&w, &user, 5_000_0000, 2_000_0000);
+
+        // Create a withdrawal to get a key.
+        let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+            .create_withdrawal(&user, &CreateWithdrawalParams {
+                receiver:               user.clone(),
+                market:                 w.market_tk.clone(),
+                market_token_amount:    lp_balance,
+                min_long_token_amount:  0,
+                min_short_token_amount: 0,
+                execution_fee:          0,
+            });
+
+        let impostor = Address::generate(&w.env);
+        // impostor has no ORDER_KEEPER role — must panic with Unauthorized.
+        WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
+            .execute_withdrawal(&impostor, &wth_key);
+    }
 }

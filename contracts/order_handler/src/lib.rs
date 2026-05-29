@@ -1577,4 +1577,65 @@ mod tests {
             "user must receive short_tk at end of two-hop swap (long_tk -> mid_tk -> short_tk)");
         assert!(hc.get_order(&key).is_none(), "order consumed after two-hop swap");
     }
+
+    // ── Issue #109: authorization matrix tests ────────────────────────────────
+
+    /// execute_order must reject a caller that does not hold ORDER_KEEPER.
+    #[test]
+    #[should_panic]
+    fn execute_order_by_non_order_keeper_panics() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        let impostor  = Address::generate(&w.env);
+        // impostor has no ORDER_KEEPER role — execute_order must panic.
+        hc.execute_order(&impostor, &key);
+    }
+
+    /// liquidate_position must reject a caller that does not hold LIQUIDATION_KEEPER.
+    #[test]
+    #[should_panic]
+    fn liquidate_position_by_non_liq_keeper_panics() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        // Open a position first.
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        // Crash price so position is liquidatable.
+        set_prices(&w, 100 * fp);
+
+        let impostor = Address::generate(&w.env);
+        // impostor has no LIQUIDATION_KEEPER role — must panic with Unauthorized.
+        OrderHandlerClient::new(&w.env, &w.ord_handler)
+            .liquidate_position(&impostor, &w.user, &w.market_tk, &w.long_tk, &true);
+    }
+
+    /// execute_adl must reject a caller that does not hold ADL_KEEPER.
+    #[test]
+    #[should_panic]
+    fn execute_adl_by_non_adl_keeper_panics() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        // Open a position to have something to ADL.
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let impostor = Address::generate(&w.env);
+        // impostor has no ADL_KEEPER role — must panic with Unauthorized.
+        OrderHandlerClient::new(&w.env, &w.ord_handler)
+            .execute_adl(&impostor, &w.user, &w.market_tk, &w.long_tk, &true);
+    }
 }

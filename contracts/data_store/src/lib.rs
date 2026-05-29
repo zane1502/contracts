@@ -571,4 +571,30 @@ mod tests {
         assert_eq!(n1, 1);
         assert_eq!(n2, 2);
     }
+
+    // ── Issue #109: CONTROLLER authorization matrix ───────────────────────────
+
+    /// set_u128 must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn set_u128_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client    = DataStoreClient::new(&env, &ds_id);
+        let impostor  = Address::generate(&env);
+        let key       = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+        // impostor is not registered as CONTROLLER — must panic.
+        client.set_u128(&impostor, &key, &42u128);
+    }
+
+    /// set_address must reject a caller that does not hold CONTROLLER.
+    #[test]
+    #[should_panic]
+    fn set_address_by_non_controller_panics() {
+        let (env, _, _, ds_id) = setup();
+        let client   = DataStoreClient::new(&env, &ds_id);
+        let impostor = Address::generate(&env);
+        let key      = soroban_sdk::BytesN::from_array(&env, &[2u8; 32]);
+        let value    = Address::generate(&env);
+        client.set_address(&impostor, &key, &value);
+    }
 }

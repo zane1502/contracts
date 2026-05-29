@@ -380,4 +380,36 @@ mod tests {
         client.grant_role(&admin, &keeper, &ctrl);
         assert_eq!(client.get_role_count(), 2);
     }
+
+    // ── Issue #109: authorization matrix tests ────────────────────────────────
+
+    /// A non-admin address must not be able to grant roles (ROLE_ADMIN check).
+    #[test]
+    #[should_panic]
+    fn grant_role_by_non_admin_panics() {
+        let (env, _admin, contract_id) = setup();
+        // mock_all_auths lets require_auth() pass; the role check itself must
+        // reject an address that does not hold ROLE_ADMIN.
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let impostor = Address::generate(&env);
+        let victim   = Address::generate(&env);
+        let ctrl     = roles::controller(&env);
+        // impostor has no role — grant_role must panic with Unauthorized.
+        client.grant_role(&impostor, &victim, &ctrl);
+    }
+
+    /// A non-admin address must not be able to revoke roles (ROLE_ADMIN check).
+    #[test]
+    #[should_panic]
+    fn revoke_role_by_non_admin_panics() {
+        let (env, admin, contract_id) = setup();
+        let client = RoleStoreClient::new(&env, &contract_id);
+        let ctrl   = roles::controller(&env);
+        let holder = Address::generate(&env);
+        client.grant_role(&admin, &holder, &ctrl);
+
+        let impostor = Address::generate(&env);
+        // impostor does not hold ROLE_ADMIN — revoke must panic.
+        client.revoke_role(&impostor, &holder, &ctrl);
+    }
 }
