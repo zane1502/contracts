@@ -56,6 +56,27 @@ token-balance: preflight token-issuer
 
 token-bootstrap: token-deploy token-trust token-mint token-balance
 
+# Bootstrap all market tokens for a standard testnet deployment.
+# Creates TWBTC and TUSDC, mints an initial amount to SOURCE.
+#
+# Usage:
+#   make market-tokens NETWORK=testnet SOURCE=alice
+#   make market-tokens LONG_CODE=TWBTC SHORT_CODE=TUSDC NETWORK=testnet SOURCE=alice
+
+LONG_CODE  ?= TWBTC
+SHORT_CODE ?= TUSDC
+SEED_LONG  ?= 1000000000
+SEED_SHORT ?= 1000000000
+
+.PHONY: market-tokens
+
+market-tokens: preflight
+	$(MAKE) token-bootstrap CODE="$(LONG_CODE)"  TO="$(SOURCE)" AMOUNT="$(SEED_LONG)"  NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	$(MAKE) token-bootstrap CODE="$(SHORT_CODE)" TO="$(SOURCE)" AMOUNT="$(SEED_SHORT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	@printf 'Market tokens ready. Run:\n'
+	@printf '  make deploy-all NETWORK=$(NETWORK) SOURCE=$(SOURCE)\n'
+	@printf '  make bootstrap  NETWORK=$(NETWORK) SOURCE=$(SOURCE) LONG_CODE=$(LONG_CODE) SHORT_CODE=$(SHORT_CODE)\n'
+
 tokens:
 	@test -f "$(TOKEN_ENV)" || { printf 'Missing %s. Run make token-bootstrap first.\n' "$(TOKEN_ENV)"; exit 1; }
 	@sed -n '1,220p' "$(TOKEN_ENV)"
