@@ -1038,6 +1038,98 @@ mod tests {
         assert!(lp > 0, "LP tokens should be minted for mixed deposit");
     }
 
+    // ── Issue #27: global deposit list lifecycle ──────────────────────────────
+
+    /// Create three deposits for three different users, cancel one, execute
+    /// another, leave the third pending.  The global list and per-account list
+    /// must reflect exactly the correct state at each stage.
+    #[test]
+    fn deposit_list_reflects_full_lifecycle() {
+        let w = setup();
+        let env = &w.env;
+
+        let user_a = Address::generate(env);
+        let user_b = Address::generate(env);
+        let user_c = Address::generate(env);
+
+        for u in [&user_a, &user_b, &user_c] {
+            StellarAssetClient::new(env, &w.long_tk).mint(u, &1_000_0000i128);
+        }
+
+        let hc = DepositHandlerClient::new(env, &w.handler);
+        let ds = DsClient::new(env, &w.ds);
+
+        let make_params = |user: &Address| CreateDepositParams {
+            receiver:            user.clone(),
+            market:              w.market_tk.clone(),
+            initial_long_token:  w.long_tk.clone(),
+            initial_short_token: w.short_tk.clone(),
+            long_token_amount:   1_000_0000i128,
+            short_token_amount:  0,
+            min_market_tokens:   0,
+            execution_fee:       0,
+        };
+
+        // ── Create three deposits ─────────────────────────────────────────────
+        let key_a = hc.create_deposit(&user_a, &make_params(&user_a));
+        let key_b = hc.create_deposit(&user_b, &make_params(&user_b));
+        let key_c = hc.create_deposit(&user_c, &make_params(&user_c));
+
+        assert_eq!(ds.get_bytes32_set_count(&gmx_keys::deposit_list_key(env)), 3,
+            "global list must have 3 entries after three creates");
+        for key in [&key_a, &key_b, &key_c] {
+            assert!(ds.contains_bytes32(&gmx_keys::deposit_list_key(env), key),
+                "global list must contain each deposit key after create");
+        }
+        for (user, key) in [(&user_a, &key_a), (&user_b, &key_b), (&user_c, &key_c)] {
+            assert_eq!(
+                ds.get_bytes32_set_count(&gmx_keys::account_deposit_list_key(env, user)),
+                1,
+                "account list must have 1 entry per user after create"
+            );
+            assert!(ds.contains_bytes32(&gmx_keys::account_deposit_list_key(env, user), key));
+        }
+
+        // ── Cancel user_a's deposit ───────────────────────────────────────────
+        hc.cancel_deposit(&user_a, &key_a);
+
+        assert_eq!(ds.get_bytes32_set_count(&gmx_keys::deposit_list_key(env)), 2,
+            "global list must have 2 entries after one cancel");
+        assert!(!ds.contains_bytes32(&gmx_keys::deposit_list_key(env), &key_a),
+            "cancelled key must be absent from global list");
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::account_deposit_list_key(env, &user_a)),
+            0,
+            "cancelled user account list must be empty"
+        );
+
+        // ── Execute user_b's deposit ──────────────────────────────────────────
+        set_prices(&w);
+        hc.execute_deposit(&w.keeper, &key_b);
+
+        assert_eq!(ds.get_bytes32_set_count(&gmx_keys::deposit_list_key(env)), 1,
+            "global list must have 1 entry after cancel + execute");
+        assert!(!ds.contains_bytes32(&gmx_keys::deposit_list_key(env), &key_b),
+            "executed key must be absent from global list");
+        assert_eq!(
+            ds.get_bytes32_set_count(&gmx_keys::account_deposit_list_key(env, &user_b)),
+            0,
+            "executed user account list must be empty"
+        );
+
+        // ── user_c's deposit is still pending ─────────────────────────────────
+        assert!(ds.contains_bytes32(&gmx_keys::deposit_list_key(env), &key_c),
+            "pending deposit key must remain in global list");
+        assert!(hc.get_deposit(&key_c).is_some(),
+            "pending deposit record must still exist");
+
+        // ── Final: only key_c remains; list query returns exactly [key_c] ─────
+        let page = ds.get_bytes32_set_at(&gmx_keys::deposit_list_key(env), &0, &10);
+        assert_eq!(page.len(), 1, "list query must return exactly one key");
+        assert_eq!(page.get_unchecked(0), key_c,
+            "list query must return the still-pending deposit key");
+    }
+
     // ── Issue #44: Vault balance invariant tests ───────────────────────────────
 
     /// After execute_deposit, vault recorded balance must match actual token balance.
