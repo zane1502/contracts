@@ -21,6 +21,7 @@ use gmx_keys::{
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
     position_key,
     order_list_key, account_order_list_key, account_position_list_key,
+    deposit_list_key, account_deposit_list_key,
     withdrawal_list_key, account_withdrawal_list_key,
 };
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
@@ -412,6 +413,31 @@ impl Reader {
     /// Get a withdrawal by key (delegates to withdrawal_handler).
     pub fn get_withdrawal(env: Env, withdrawal_handler: Address, key: BytesN<32>) -> Option<WithdrawalProps> {
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).get_withdrawal(&key)
+    }
+
+    // ── Deposit key enumeration (issue #27) ──────────────────────────────────
+
+    /// Count of all pending deposit keys in DataStore.
+    pub fn get_deposit_count(env: Env, data_store: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store).get_bytes32_set_count(&deposit_list_key(&env))
+    }
+
+    /// Paginated list of all deposit keys (raw BytesN<32>).
+    pub fn get_deposit_keys(env: Env, data_store: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&deposit_list_key(&env), &start, &end)
+    }
+
+    /// Count of pending deposit keys for a specific account.
+    pub fn get_account_deposit_count(env: Env, data_store: Address, account: Address) -> u32 {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_count(&account_deposit_list_key(&env, &account))
+    }
+
+    /// Paginated list of deposit keys for a specific account.
+    pub fn get_account_deposit_keys(env: Env, data_store: Address, account: Address, start: u32, end: u32) -> Vec<BytesN<32>> {
+        DataStoreClient::new(&env, &data_store)
+            .get_bytes32_set_at(&account_deposit_list_key(&env, &account), &start, &end)
     }
 
     // ── Withdrawal key enumeration (issue #24) ────────────────────────────────
