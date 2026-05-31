@@ -200,9 +200,21 @@ impl ExchangeRouter {
     /// Single caller.require_auth() covers all sub-actions (they run inside this invocation).
     /// Returns one BytesN<32> result per action (create_* returns a key; others return zero hash).
     /// If any action panics, the entire transaction reverts (Soroban atomicity).
+    ///
+    /// Handlers are called directly (not via the self-referential public wrappers) to avoid a
+    /// double require_auth() within the same invocation frame, which Soroban rejects.
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
         Self::require_not_paused(&env);
+
+        let deposit_handler: Address   = env.storage().instance().get(&InstanceKey::DepositHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let withdrawal_handler: Address = env.storage().instance().get(&InstanceKey::WithdrawalHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_handler: Address     = env.storage().instance().get(&InstanceKey::OrderHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let fee_handler: Address       = env.storage().instance().get(&InstanceKey::FeeHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
 
         let mut results: Vec<BytesN<32>> = Vec::new(&env);
         let zero_key = BytesN::from_array(&env, &[0u8; 32]);
@@ -218,35 +230,58 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateDeposit(p) => {
-                    let key = Self::create_deposit(env.clone(), caller.clone(), p);
+                    let key = DepositHandlerClient::new(&env, &deposit_handler)
+                        .create_deposit(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelDeposit(key) => {
-                    Self::cancel_deposit(env.clone(), caller.clone(), key);
+                    DepositHandlerClient::new(&env, &deposit_handler)
+                        .cancel_deposit(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateWithdrawal(p) => {
-                    let key = Self::create_withdrawal(env.clone(), caller.clone(), p);
+                    let key = WithdrawalHandlerClient::new(&env, &withdrawal_handler)
+                        .create_withdrawal(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::CancelWithdrawal(key) => {
-                    Self::cancel_withdrawal(env.clone(), caller.clone(), key);
+                    WithdrawalHandlerClient::new(&env, &withdrawal_handler)
+                        .cancel_withdrawal(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateOrder(p) => {
-                    let key = Self::create_order(env.clone(), caller.clone(), p);
+                    let key = OrderHandlerClient::new(&env, &order_handler)
+                        .create_order(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::UpdateOrder(p) => {
-                    Self::update_order(env.clone(), caller.clone(), p);
+                    OrderHandlerClient::new(&env, &order_handler).update_order(
+                        &caller,
+                        &p.key,
+                        &p.size_delta_usd,
+                        &p.acceptable_price,
+                        &p.trigger_price,
+                        &p.min_output_amount,
+                    );
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CancelOrder(key) => {
-                    Self::cancel_order(env.clone(), caller.clone(), key);
+                    OrderHandlerClient::new(&env, &order_handler)
+                        .cancel_order(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::ClaimFundingFees(p) => {
-                    Self::claim_funding_fees(env.clone(), caller.clone(), p.markets, p.tokens);
+                    let fee_client = FeeHandlerClient::new(&env, &fee_handler);
+                    let mlen = p.markets.len();
+                    let mut mi = 0u32;
+                    while mi < mlen {
+                        fee_client.claim_funding_fees(
+                            &caller,
+                            &p.markets.get(mi).unwrap(),
+                            &p.tokens.get(mi).unwrap(),
+                        );
+                        mi += 1;
+                    }
                     results.push_back(zero_key.clone());
                 }
             }
@@ -868,5 +903,142 @@ mod tests {
         // Must panic with NotLiquidatable
         LHClient::new(&w.env, &w.liq_handler)
             .liquidate_position(&w.liq_keeper, &trader, &w.market_tk, &w.long_tk, &true);
+    }
+
+    // ── Issue #135: Router multicall E2E tests ────────────────────────────────
+
+    /// Successful multicall: SendTokens to order_vault followed by CreateOrder
+    /// completes atomically. The order is created with the canonical collateral
+    /// model (send-first, then create), and the resulting key is executable.
+    #[test]
+    fn e2e_multicall_send_tokens_then_create_order_succeeds() {
+        let w      = setup();
+        let fp     = FLOAT_PRECISION;
+        let lp     = Address::generate(&w.env);
+        let trader = Address::generate(&w.env);
+
+        let entry_price = 2_000 * fp;
+        set_prices(&w, entry_price);
+
+        // Seed pool so the market has liquidity to absorb the position
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &(ONE_TOKEN * 100));
+        provide_liquidity(&w, &lp, ONE_TOKEN * 100, 0);
+
+        set_prices(&w, entry_price);
+
+        // Mint collateral to trader
+        let collateral = 2 * ONE_TOKEN;
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&trader, &collateral);
+
+        // Verify collateral is in trader's account before multicall
+        let balance_before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&trader);
+        assert_eq!(balance_before, collateral);
+
+        // Build multicall: [SendTokens → ord_vault, CreateOrder (MarketIncrease)]
+        let actions = soroban_sdk::vec![
+            &w.env,
+            RouterAction::SendTokens(SendTokensParams {
+                token:    w.long_tk.clone(),
+                receiver: w.ord_vault.clone(),
+                amount:   collateral,
+            }),
+            RouterAction::CreateOrder(gmx_types::CreateOrderParams {
+                receiver:                 trader.clone(),
+                market:                   w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path:                soroban_sdk::Vec::new(&w.env),
+                size_delta_usd:           4_000 * fp,
+                collateral_delta_amount:  collateral,
+                trigger_price:            0,
+                acceptable_price:         0,
+                execution_fee:            0,
+                min_output_amount:        0,
+                order_type:               OrderType::MarketIncrease,
+                is_long:                  true,
+            }),
+        ];
+
+        let router_client = ExchangeRouterClient::new(&w.env, &w.router);
+        let results = router_client.multicall(&trader, &actions);
+
+        // First result is zero_key (SendTokens), second is the created order key
+        assert_eq!(results.len(), 2);
+        let zero_key = soroban_sdk::BytesN::from_array(&w.env, &[0u8; 32]);
+        assert_eq!(results.get(0).unwrap(), zero_key, "SendTokens result must be zero_key");
+
+        let order_key = results.get(1).unwrap();
+        assert_ne!(order_key, zero_key, "CreateOrder must return a non-zero order key");
+
+        // Trader's collateral has moved to the vault
+        let trader_bal_after = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&trader);
+        assert_eq!(trader_bal_after, 0, "trader collateral must be in vault after multicall");
+
+        // Execute the order and verify a position was opened
+        OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &order_key);
+
+        let pos_key = gmx_keys::position_key(&w.env, &trader, &w.market_tk, &w.long_tk, true);
+        let position = OHClient::new(&w.env, &w.ord_handler)
+            .get_position(&pos_key)
+            .expect("position must exist after multicall + execute_order");
+        assert!(position.size_in_usd > 0, "position must have positive size after successful multicall");
+    }
+
+    /// Atomicity guarantee: if any step in a multicall panics, all preceding
+    /// steps are also reverted. Here, SendTokens succeeds but the following
+    /// CancelOrder (non-existent key) panics, rolling back the token transfer.
+    #[test]
+    fn e2e_multicall_failed_step_reverts_preceding_steps() {
+        let w      = setup();
+        let lp     = Address::generate(&w.env);
+        let trader = Address::generate(&w.env);
+
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        // Seed pool
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &(ONE_TOKEN * 50));
+        provide_liquidity(&w, &lp, ONE_TOKEN * 50, 0);
+
+        set_prices(&w, 2_000 * FLOAT_PRECISION);
+
+        // Mint tokens to trader
+        let amount = ONE_TOKEN;
+        StellarAssetClient::new(&w.env, &w.long_tk).mint(&trader, &amount);
+
+        let balance_before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&trader);
+        assert_eq!(balance_before, amount);
+
+        // A random key that doesn't correspond to any real order
+        let fake_key = soroban_sdk::BytesN::from_array(&w.env, &[0xFFu8; 32]);
+
+        // Build multicall: Step 1 transfers tokens (would succeed alone),
+        // Step 2 cancels a non-existent order → will panic → reverts Step 1.
+        let actions = soroban_sdk::vec![
+            &w.env,
+            RouterAction::SendTokens(SendTokensParams {
+                token:    w.long_tk.clone(),
+                receiver: w.ord_vault.clone(),
+                amount,
+            }),
+            RouterAction::CancelOrder(fake_key),
+        ];
+
+        let router_client = ExchangeRouterClient::new(&w.env, &w.router);
+        let result = router_client.try_multicall(&trader, &actions);
+
+        // Multicall must have failed
+        assert!(result.is_err(), "multicall must fail when a step panics");
+
+        // Step 1 (SendTokens) must have been atomically reverted:
+        // trader still holds the full amount
+        let balance_after = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&trader);
+        assert_eq!(
+            balance_after, balance_before,
+            "token transfer from Step 1 must revert when Step 2 fails; balance_after={}, balance_before={}",
+            balance_after, balance_before
+        );
+
+        // Vault must hold nothing (transfer also reverted)
+        let vault_bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.ord_vault);
+        assert_eq!(vault_bal, 0, "order_vault must hold nothing after multicall reverts");
     }
 }
