@@ -702,4 +702,201 @@ mod tests {
             "long cap must not affect short-side validation"
         );
     }
+
+    // ── Issue #137: differential tests against reference GMX formulas ─────────
+    //
+    // Each test pins a specific numeric result computed by hand from the GMX
+    // formula definition. If formula drift occurs the assertion fails and the
+    // deviation must be documented or fixed.
+
+    /// Reference: long PnL = oi_tokens * price / TOKEN_PRECISION - oi_usd_long
+    ///
+    /// Example from GMX docs / formula:
+    ///   oi_usd  = 10_000 * FP   (long traders opened $10 000 of size)
+    ///   oi_tokens = 5 * TOKEN_PRECISION  (5 ETH at $2 000 each at open)
+    ///   current price = $3 000
+    ///   position_value = 5 * 3_000 * FP = 15_000 * FP
+    ///   pnl = 15_000*FP - 10_000*FP = 5_000*FP
+    #[test]
+    fn differential_get_pnl_long_matches_reference_formula() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let market = make_market_props(&mt, &it, &lt, &st);
+
+        let fp = FLOAT_PRECISION;
+        let ds_c = DsClient::new(&env, &ds);
+
+        let oi_usd    = 10_000_i128 * fp;
+        let oi_tokens = 5_i128 * 10_000_000; // 5 whole tokens (7-decimal precision)
+        let price     = 3_000_i128 * fp;      // $3 000 in FLOAT_PRECISION
+
+        // Seed OI via long_token collateral
+        let oi_key   = gmx_keys::open_interest_key(&env, &mt, &lt, true);
+        let tok_key  = gmx_keys::open_interest_in_tokens_key(&env, &mt, &lt, true);
+        ds_c.apply_delta_to_u128(&admin, &oi_key,  &oi_usd);
+        ds_c.apply_delta_to_u128(&admin, &tok_key, &oi_tokens);
+
+        let pnl = get_pnl(&env, &ds, &market, price, true, true);
+
+        // Reference: position_value = oi_tokens * price / TOKEN_PRECISION
+        let expected_value = mul_div_wide(&env, oi_tokens, price, TOKEN_PRECISION);
+        let expected_pnl   = expected_value - oi_usd;
+
+        assert_eq!(
+            pnl, expected_pnl,
+            "get_pnl long must match reference: pnl={pnl}, expected={expected_pnl}"
+        );
+        assert_eq!(pnl, 5_000 * fp, "known numeric value: 5 ETH * $3000 - $10000 = $5000");
+    }
+
+    /// Reference: short PnL = oi_usd_short - oi_tokens * price / TOKEN_PRECISION
+    ///
+    ///   oi_usd  = 8_000 * FP   (short traders shorted $8 000)
+    ///   oi_tokens = 4 * TOKEN_PRECISION  (4 ETH at $2 000 each at open)
+    ///   current price = $1 500  (fallen → shorts profit)
+    ///   position_value = 4 * 1_500 * FP = 6_000 * FP
+    ///   pnl = 8_000*FP - 6_000*FP = 2_000*FP
+    #[test]
+    fn differential_get_pnl_short_matches_reference_formula() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let market = make_market_props(&mt, &it, &lt, &st);
+
+        let fp = FLOAT_PRECISION;
+        let ds_c = DsClient::new(&env, &ds);
+
+        let oi_usd    = 8_000_i128 * fp;
+        let oi_tokens = 4_i128 * 10_000_000; // 4 tokens
+        let price     = 1_500_i128 * fp;
+
+        let oi_key  = gmx_keys::open_interest_key(&env, &mt, &st, false);
+        let tok_key = gmx_keys::open_interest_in_tokens_key(&env, &mt, &st, false);
+        ds_c.apply_delta_to_u128(&admin, &oi_key,  &oi_usd);
+        ds_c.apply_delta_to_u128(&admin, &tok_key, &oi_tokens);
+
+        let pnl = get_pnl(&env, &ds, &market, price, false, true);
+
+        let expected_value = mul_div_wide(&env, oi_tokens, price, TOKEN_PRECISION);
+        let expected_pnl   = oi_usd - expected_value;
+
+        assert_eq!(
+            pnl, expected_pnl,
+            "get_pnl short must match reference: pnl={pnl}, expected={expected_pnl}"
+        );
+        assert_eq!(pnl, 2_000 * fp, "known numeric value: $8000 - 4 * $1500 = $2000");
+    }
+
+    /// Reference: pool value = longUSD + shortUSD - netPnL (PnL owed to traders).
+    ///
+    ///   long_pool  = 5 tokens @ $2 000 → $10 000
+    ///   short_pool = 4_000 tokens (stablecoin) @ $1 → $4 000
+    ///   no open positions → netPnL = 0
+    ///   pool_value = $10 000 + $4 000 = $14 000
+    #[test]
+    fn differential_get_pool_value_no_positions_matches_reference() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let market = make_market_props(&mt, &it, &lt, &st);
+
+        let fp = FLOAT_PRECISION;
+        let ds_c = DsClient::new(&env, &ds);
+
+        // long_pool: 5 tokens
+        let long_pool  = 5_i128 * 10_000_000;
+        // short_pool: 4000 stablecoins
+        let short_pool = 4_000_i128 * 10_000_000;
+
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &lt), &long_pool);
+        ds_c.apply_delta_to_u128(&admin, &gmx_keys::pool_amount_key(&env, &mt, &st), &short_pool);
+
+        let long_price  = 2_000_i128 * fp; // $2 000
+        let short_price = fp;              // $1 (stablecoin)
+        let index_price = 2_000_i128 * fp;
+
+        let info = get_pool_value(&env, &ds, &market, long_price, short_price, index_price, true);
+
+        // Expected: long = 5 * $2000 = $10_000,  short = 4000 * $1 = $4_000
+        let expected_long_usd  = mul_div_wide(&env, long_pool,  long_price,  TOKEN_PRECISION);
+        let expected_short_usd = mul_div_wide(&env, short_pool, short_price, TOKEN_PRECISION);
+        let expected_pool_value = expected_long_usd + expected_short_usd; // no PnL, no impact pool
+
+        assert_eq!(
+            info.long_token_usd, expected_long_usd,
+            "long token USD must match reference: got {}, expected {}", info.long_token_usd, expected_long_usd
+        );
+        assert_eq!(
+            info.short_token_usd, expected_short_usd,
+            "short token USD must match reference"
+        );
+        assert_eq!(info.net_pnl, 0, "no open positions → net PnL must be 0");
+        assert_eq!(
+            info.pool_value, expected_pool_value,
+            "pool value must match reference: got {}, expected {}", info.pool_value, expected_pool_value
+        );
+        assert_eq!(info.pool_value, 14_000 * fp, "known value: 5*$2000 + 4000*$1 = $14000");
+    }
+
+    /// Reference: borrowing fee = (cum_factor_now - factor_at_open) * size_in_tokens / FP
+    ///
+    ///   cum_factor_now      = FP / 10  (10%)
+    ///   cum_factor_at_open  = 0
+    ///   size_in_tokens      = 2 * TOKEN_PRECISION
+    ///   fee = (FP/10 - 0) * (2 * TOKEN_PRECISION) / FP = 0.1 * 2 tokens = 0.2 tokens
+    #[test]
+    fn differential_get_borrowing_fees_matches_reference_formula() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let market = make_market_props(&mt, &it, &lt, &st);
+
+        let fp = FLOAT_PRECISION;
+        let ds_c = DsClient::new(&env, &ds);
+
+        let cum_factor_now: u128  = (fp / 10) as u128; // 10%
+        let cum_factor_at_open: u128 = 0;
+        let size_in_tokens: u128  = 2 * 10_000_000;   // 2 whole tokens
+
+        let cum_key = gmx_keys::cumulative_borrowing_factor_key(&env, &mt, true);
+        ds_c.set_u128(&admin, &cum_key, &cum_factor_now);
+
+        let fee = get_borrowing_fees(&env, &ds, &market, &lt, true, cum_factor_at_open, size_in_tokens);
+
+        // Reference: delta = 10%; fee = 10% * 2 tokens = 0.2 tokens = 2_000_000 units
+        let delta    = cum_factor_now - cum_factor_at_open;
+        let expected = mul_div_wide(&env, delta as i128, size_in_tokens as i128, fp) as u128;
+
+        assert_eq!(
+            fee, expected,
+            "borrowing fee must match reference: fee={fee}, expected={expected}"
+        );
+        assert_eq!(fee, 2_000_000u128, "known numeric: 10% of 2 tokens = 0.2 tokens = 2_000_000 units");
+    }
+
+    /// Reference: long PnL is zero when price equals entry price (break-even).
+    /// This validates no rounding or formula drift at the identity point.
+    #[test]
+    fn differential_long_pnl_zero_at_entry_price() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = make_market(&env);
+        let market = make_market_props(&mt, &it, &lt, &st);
+
+        let fp          = FLOAT_PRECISION;
+        let entry_price = 2_000_i128 * fp;
+        let size_tokens = 3_i128 * 10_000_000; // 3 tokens
+        let size_usd    = mul_div_wide(&env, size_tokens, entry_price, TOKEN_PRECISION);
+
+        let ds_c = DsClient::new(&env, &ds);
+        let oi_key  = gmx_keys::open_interest_key(&env, &mt, &lt, true);
+        let tok_key = gmx_keys::open_interest_in_tokens_key(&env, &mt, &lt, true);
+        ds_c.apply_delta_to_u128(&admin, &oi_key,  &size_usd);
+        ds_c.apply_delta_to_u128(&admin, &tok_key, &size_tokens);
+
+        let pnl = get_pnl(&env, &ds, &market, entry_price, true, true);
+
+        assert_eq!(pnl, 0, "long PnL at entry price must be exactly 0, got {pnl}");
+    }
 }

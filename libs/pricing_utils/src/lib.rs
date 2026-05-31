@@ -650,6 +650,141 @@ mod tests {
         assert_eq!(before, after, "zero impact must not mutate impact pool");
     }
 
+    // ── Issue #137: differential tests against reference GMX formulas ─────────
+    //
+    // Each test computes a reference value by hand and asserts the function
+    // matches it exactly, catching any formula drift.
+
+    /// Reference (SwapPricingUtils): execution price with zero price impact.
+    ///   index_price    = $2 000  (FP)
+    ///   size_delta_usd = $10 000 (FP)
+    ///   price_impact   = 0
+    ///   execution_price = index_price (no shift)
+    #[test]
+    fn differential_execution_price_zero_impact_equals_index() {
+        let env = Env::default();
+        let index_price    = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+
+        let exec = get_execution_price(&env, index_price, size_delta_usd, 0, true, true);
+
+        assert_eq!(exec, index_price, "zero-impact execution price must equal index: {exec} != {index_price}");
+    }
+
+    /// Reference: negative price impact raises execution price for a long.
+    ///   index_price    = $2 000
+    ///   size_delta_usd = $10 000
+    ///   impact_usd     = −$100  (user gets $9 900 worth of tokens for $10 000)
+    ///   adjusted_tokens = $9 900 / $2 000 per token × TOKEN_PRECISION
+    ///   exec_price     = $10 000 / adjusted_tokens × TOKEN_PRECISION
+    ///                  = $10 000 / (9 900 / 2 000) ≈ $2 020.20…
+    ///   → exec_price > index_price (trader pays more per token)
+    #[test]
+    fn differential_execution_price_negative_impact_raises_long_price() {
+        let env = Env::default();
+        let index_price    = 2_000 * FLOAT_PRECISION;
+        let size_delta_usd = 10_000 * FLOAT_PRECISION;
+        let impact_usd     = -(100 * FLOAT_PRECISION);
+
+        let exec = get_execution_price(&env, index_price, size_delta_usd, impact_usd, true, true);
+
+        // Reference: adjusted_size = size_delta_usd + impact_usd = $9_900
+        let adjusted_size  = size_delta_usd + impact_usd;
+        let adjusted_tokens = mul_div_wide(&env, adjusted_size, TOKEN_PRECISION, index_price);
+        let expected_exec  = mul_div_wide(&env, size_delta_usd, TOKEN_PRECISION, adjusted_tokens);
+
+        assert_eq!(
+            exec, expected_exec,
+            "execution price must match reference formula: exec={exec}, expected={expected_exec}"
+        );
+        assert!(exec > index_price, "negative impact must raise execution price: exec={exec}, index={index_price}");
+    }
+
+    /// Reference: get_swap_output_amount with no price impact and no fee.
+    ///   amount_in   = 100 tokens (TOKEN_PRECISION)
+    ///   price_in    = $2 000  (FP)
+    ///   price_out   = $1      (FP — stable)
+    ///   fee         = 0
+    ///   raw_out     = 100 tokens * $2000 / $1 = 200_000 tokens
+    ///   (using TOKEN_PRECISION: 100 * 10^7 * 2000*FP / FP = 200_000 * 10^7)
+    #[test]
+    fn differential_swap_output_no_fee_no_impact_matches_price_ratio() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        let price_in  = 2_000 * FLOAT_PRECISION;
+        let price_out = FLOAT_PRECISION; // $1 stable
+        let amount_in = 100 * TOKEN_PRECISION;
+
+        // Balanced pools so there is no price impact (zero impact factors).
+        // Pool sizes must be small enough that pool_usd = tokens * price / TOKEN_PRECISION
+        // fits within i128. 1_000 tokens * $2_000 * FP / TOKEN_PRECISION = 2e36 < i128::MAX.
+        seed_swap_market(&env, &ds, &admin, &market,
+            1_000 * TOKEN_PRECISION, 2_000_000 * TOKEN_PRECISION, // balanced in USD: $2M each side
+            0, 0, FLOAT_PRECISION);
+
+        // Zero fee factors
+        DsClient::new(&env, &ds).set_u128(&admin, &gmx_keys::swap_fee_factor_key(&env, &mt, true),  &0u128);
+        DsClient::new(&env, &ds).set_u128(&admin, &gmx_keys::swap_fee_factor_key(&env, &mt, false), &0u128);
+
+        let (output, fee) = get_swap_output_amount(
+            &env, &ds, &market, &lt, &st,
+            amount_in, price_in, price_out,
+            true,
+        );
+
+        // Reference: output = amount_in * price_in / price_out
+        let expected_output = mul_div_wide(&env, amount_in, price_in, price_out);
+        assert_eq!(fee, 0, "zero fee factor must produce zero fee");
+        assert_eq!(
+            output, expected_output,
+            "output must match price ratio: output={output}, expected={expected_output}"
+        );
+        // 100 tokens * $2000 / $1 = 200_000 tokens
+        assert_eq!(output, 200_000 * TOKEN_PRECISION, "known numeric: 100 tokens at 2000x = 200_000 tokens");
+    }
+
+    /// Reference: swap fee calculation.
+    ///   amount_out_before_fee = 1_000 tokens (TOKEN_PRECISION)
+    ///   fee_factor            = 0.3% = FP * 3 / 1_000
+    ///   fee                   = 1_000 tokens * 0.003 = 3 tokens = 3 * TOKEN_PRECISION
+    ///   net_output            = 997 tokens
+    ///
+    /// Uses ceiling rounding so fee >= 3 tokens (never under-collected).
+    #[test]
+    fn differential_swap_fee_matches_reference_formula() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, ds, mt, it, lt, st) = setup(&env);
+        let market = make_market(&mt, &it, &lt, &st);
+
+        let fee_factor = 3 * FLOAT_PRECISION / 1_000; // 0.3%
+        let price = FLOAT_PRECISION; // $1 / token (both tokens same price → simple)
+
+        // Balanced pools so impact = 0
+        seed_swap_market(&env, &ds, &admin, &market,
+            100_000 * TOKEN_PRECISION, 100_000 * TOKEN_PRECISION,
+            0, 0, FLOAT_PRECISION);
+
+        // Set fee for positive-impact direction
+        DsClient::new(&env, &ds).set_u128(&admin, &gmx_keys::swap_fee_factor_key(&env, &mt, true),  &(fee_factor as u128));
+        DsClient::new(&env, &ds).set_u128(&admin, &gmx_keys::swap_fee_factor_key(&env, &mt, false), &(fee_factor as u128));
+
+        let amount_in = 1_000 * TOKEN_PRECISION;
+
+        let (output, fee) = get_swap_output_amount(
+            &env, &ds, &market, &lt, &st,
+            amount_in, price, price,
+            true, // for_positive_impact
+        );
+
+        // Reference: fee = ceil(1000 tokens * 0.003) = 3 tokens = 30_000_000 units
+        assert_eq!(fee, 3 * TOKEN_PRECISION, "fee must be 0.3% of amount_out_before_fee");
+        assert_eq!(output, 1_000 * TOKEN_PRECISION - 3 * TOKEN_PRECISION, "net output = 997 tokens");
+    }
+
     /// Negative position price impact increases the position impact pool.
     #[test]
     fn negative_position_impact_increases_impact_pool() {
