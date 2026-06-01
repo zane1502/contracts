@@ -611,21 +611,6 @@ pub fn ui_fee_factor_key(env: &Env, ui_fee_receiver: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-/// Claimable UI fee amount per (market, token, ui_fee_receiver)
-pub fn claimable_ui_fee_amount_key(
-    env: &Env,
-    market: &Address,
-    token: &Address,
-    ui_fee_receiver: &Address,
-) -> BytesN<32> {
-    let mut b = Bytes::new(env);
-    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
-    push_addr(&mut b, env, market);
-    push_addr(&mut b, env, token);
-    push_addr(&mut b, env, ui_fee_receiver);
-    sha256(env, &b)
-}
-
 /// ADL enabled flag per (market, is_long)
 pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);

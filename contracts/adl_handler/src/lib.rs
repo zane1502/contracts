@@ -147,14 +147,12 @@ impl AdlHandler {
 
         let pnl_factor = mul_div_wide(&env, pnl, FLOAT_PRECISION, pool_info.pool_value);
 
-        // Read the side-specific ADL threshold (long and short keys are distinct via is_long).
-        // A zero value means the key was never set; treat this as a misconfiguration rather
-        // than silently disabling ADL, which could leave the pool unprotected.
+        // A zero value means no threshold is configured; ADL is disabled for this market/side.
         let max_pnl_factor = DataStoreClient::new(&env, &data_store)
             .get_u128(&max_pnl_factor_for_adl_key(&env, &market, is_long)) as i128;
 
         if max_pnl_factor == 0 {
-            panic_with_error!(&env, Error::MissingMaxPnlConfig);
+            return false;
         }
         pnl_factor > max_pnl_factor
     }

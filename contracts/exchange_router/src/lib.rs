@@ -133,6 +133,7 @@ trait IOrderHandler {
 #[soroban_sdk::contractclient(name = "FeeHandlerClient")]
 trait IFeeHandler {
     fn claim_funding_fees(env: Env, account: Address, market: Address, token: Address) -> u128;
+    fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128);
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -407,6 +408,13 @@ impl ExchangeRouter {
             );
             i += 1;
         }
+    }
+
+    /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.
+    pub fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128) {
+        let fee_handler: Address = env.storage().instance().get(&InstanceKey::FeeHandler)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        FeeHandlerClient::new(&env, &fee_handler).set_ui_fee_factor(&ui_receiver, &factor);
     }
 }
 

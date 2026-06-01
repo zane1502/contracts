@@ -686,6 +686,7 @@ version = "0.1.0"
 dependencies = [
  "data-store",
  "gmx-keys",
+ "gmx-math",
  "gmx-types",
  "market-token",
  "role-store",

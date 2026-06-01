@@ -610,6 +610,139 @@ mod tests {
         );
     }
 
+    // ── Issue #83: min collateral factor edge-case tests ─────────────────────
+    //
+    // Done: Missing config key, zero value, and very high value each produce safe
+    //       and documented behavior. Tests cover all three.
+
+    /// When min_collateral_factor_key is never set (DataStore returns 0 for any
+    /// unset key), is_liquidatable falls back to the `remaining < 0` check.
+    #[test]
+    fn is_liquidatable_missing_key_falls_back_to_remaining_check() {
+        let w      = setup();
+        let market = make_market(&w);
+        let entry_p = 2_000 * FP;
+
+        // Deeply leveraged long: 1 token collateral, $10 000 notional
+        let position = make_position(&w, 10_000 * FP, ONE_TOKEN, entry_p);
+
+        // Price crashes 90% → remaining = collateral_usd + pnl < 0
+        let crash_price = 200 * FP;
+        let crash_props = PriceProps { min: crash_price, max: crash_price };
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &position, &market, crash_price, &crash_props),
+            "leveraged long with crashed price and no factor configured must be liquidatable"
+        );
+
+        // Well-collateralised long at entry price → remaining > 0 → not liquidatable
+        let safe_position = make_position(&w, 1_000 * FP, ONE_TOKEN * 100, entry_p);
+        let entry_props   = PriceProps { min: entry_p, max: entry_p };
+        assert!(
+            !is_liquidatable(&w.env, &w.ds, &safe_position, &market, entry_p, &entry_props),
+            "well-collateralised position with no factor configured must not be liquidatable"
+        );
+    }
+
+    /// Explicitly setting min_collateral_factor to 0 produces the same behaviour as
+    /// never setting it — the code path is identical (DataStore returns 0 for both).
+    #[test]
+    fn is_liquidatable_zero_factor_explicit_same_as_missing() {
+        let w      = setup();
+        let ds_c   = DsClient::new(&w.env, &w.ds);
+        let market = make_market(&w);
+        let entry_p = 2_000 * FP;
+
+        ds_c.set_u128(&w.admin, &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk), &0u128);
+
+        let position    = make_position(&w, 10_000 * FP, ONE_TOKEN, entry_p);
+        let crash_price = 200 * FP;
+        let crash_props = PriceProps { min: crash_price, max: crash_price };
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &position, &market, crash_price, &crash_props),
+            "factor=0 explicit must behave the same as missing key (remaining < 0)"
+        );
+
+        let safe_position = make_position(&w, 1_000 * FP, ONE_TOKEN * 100, entry_p);
+        let entry_props   = PriceProps { min: entry_p, max: entry_p };
+        assert!(
+            !is_liquidatable(&w.env, &w.ds, &safe_position, &market, entry_p, &entry_props),
+            "factor=0 explicit: healthy position must not be liquidatable"
+        );
+    }
+
+    /// A very high min_collateral_factor (100% = FLOAT_PRECISION) makes positions
+    /// with collateral_usd < size_in_usd liquidatable. The same position passes
+    /// with a low factor.
+    #[test]
+    fn is_liquidatable_very_high_factor_triggers_liquidation() {
+        let w      = setup();
+        let ds_c   = DsClient::new(&w.env, &w.ds);
+        let market = make_market(&w);
+        let price  = 2_000 * FP;
+        let props  = PriceProps { min: price, max: price };
+
+        // Position: $10 000 notional, 1 token collateral → collateral_usd = $2 000
+        let position = make_position(&w, 10_000 * FP, ONE_TOKEN, price);
+
+        // 100% factor: min_required = size_in_usd = $10 000 > collateral_usd $2 000 → liquidatable
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &(FP as u128),
+        );
+        assert!(
+            is_liquidatable(&w.env, &w.ds, &position, &market, price, &props),
+            "100% factor: position with collateral_usd < size_in_usd must be liquidatable"
+        );
+
+        // 10% factor: min_required = $1 000 < collateral_usd $2 000 → not liquidatable
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &((FP / 10) as u128),
+        );
+        assert!(
+            !is_liquidatable(&w.env, &w.ds, &position, &market, price, &props),
+            "10% factor: position with 20% collateral ratio must not be liquidatable"
+        );
+    }
+
+    /// validate_position does not panic when min_collateral_factor is 0 (key unset).
+    #[test]
+    fn validate_position_zero_factor_does_not_panic() {
+        let w        = setup();
+        let market   = make_market(&w);
+        let price    = 2_000 * FP;
+        let props    = PriceProps { min: price, max: price };
+        // Minimal collateral relative to position — would fail with a strict factor,
+        // but factor=0 skips the min-collateral check entirely.
+        let position = make_position(&w, 10_000 * FP, ONE_TOKEN, price);
+        // Should not panic
+        validate_position(&w.env, &w.ds, &position, &market, price, &props);
+    }
+
+    /// validate_position panics when factor is set high enough that the position's
+    /// collateral falls below the required minimum.
+    #[test]
+    #[should_panic]
+    fn validate_position_factor_enforced_when_set() {
+        let w      = setup();
+        let ds_c   = DsClient::new(&w.env, &w.ds);
+        let market = make_market(&w);
+        let price  = 2_000 * FP;
+        let props  = PriceProps { min: price, max: price };
+
+        // 100% factor: collateral must be >= size_in_usd
+        // Position: $10 000 size, 1 token @ $2 000 = $2 000 collateral → insufficient
+        ds_c.set_u128(
+            &w.admin,
+            &gmx_keys::min_collateral_factor_key(&w.env, &w.market_tk),
+            &(FP as u128),
+        );
+        let position = make_position(&w, 10_000 * FP, ONE_TOKEN, price);
+        validate_position(&w.env, &w.ds, &position, &market, price, &props);
+    }
+
     // ── Issue #137: differential tests against reference GMX formulas ─────────
     //
     // Each test pins a specific numeric result against a manually derived

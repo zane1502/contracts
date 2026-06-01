@@ -10,8 +10,9 @@ use soroban_sdk::{
 use gmx_keys::{
     roles,
     claimable_fee_amount_key, claimable_funding_amount_key,
-    claimable_ui_fee_amount_key,
+    claimable_ui_fee_amount_key, ui_fee_factor_key,
 };
+use gmx_math::FLOAT_PRECISION;
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -92,6 +93,13 @@ pub struct UiFeeClaimed {
     pub ui_receiver: Address,
     pub token:       Address,
     pub amount:      u128,
+}
+
+#[contractevent(topics = ["ui_fee_set"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiFeeFactorSet {
+    pub ui_receiver: Address,
+    pub factor:      u128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -259,6 +267,32 @@ impl FeeHandler {
 
         env.events().publish_event(&FundingFeeClaimed { account, market, token, amount });
         amount
+    }
+
+    // ── UI fee factor configuration (issue #100) ─────────────────────────────
+
+    /// Return the stored UI fee factor for a given receiver (0 if unset).
+    pub fn get_ui_fee_factor(env: Env, ui_receiver: Address) -> u128 {
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        DataStoreClient::new(&env, &data_store).get_u128(&ui_fee_factor_key(&env, &ui_receiver))
+    }
+
+    /// Set the UI fee factor for a given receiver. Only the stored admin may call.
+    ///
+    /// `factor` must be ≤ FLOAT_PRECISION (10^30, i.e. 100%). A factor above this
+    /// is nonsensical (> 100% fee) and is rejected with `InvalidAmount`.
+    pub fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128) {
+        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        if factor > FLOAT_PRECISION as u128 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let handler = env.current_contract_address();
+        let key = ui_fee_factor_key(&env, &ui_receiver);
+        DataStoreClient::new(&env, &data_store).set_u128(&handler, &key, &factor);
+        env.events().publish_event(&UiFeeFactorSet { ui_receiver, factor });
     }
 }
 
@@ -603,6 +637,64 @@ mod tests {
         let ui_recv  = Address::generate(&w.env);
         FeeHandlerClient::new(&w.env, &w.handler)
             .accrue_ui_fee(&impostor, &w.long_tk, &ui_recv, &100u128);
+    }
+
+    // ── Issue #100: UI fee factor set/get ────────────────────────────────────
+
+    /// get_ui_fee_factor returns 0 before any factor is set.
+    #[test]
+    fn ui_fee_factor_zero_initially() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        let factor = FeeHandlerClient::new(&w.env, &w.handler)
+            .get_ui_fee_factor(&ui_recv);
+        assert_eq!(factor, 0, "UI fee factor must be 0 before any configuration");
+    }
+
+    /// set_ui_fee_factor stores the value; get_ui_fee_factor retrieves it.
+    #[test]
+    fn set_ui_fee_factor_stores_and_retrieves() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+        let factor: u128 = gmx_math::FLOAT_PRECISION as u128 / 100; // 1%
+        fh.set_ui_fee_factor(&ui_recv, &factor);
+        assert_eq!(fh.get_ui_fee_factor(&ui_recv), factor,
+            "stored factor must equal the value passed to set_ui_fee_factor");
+    }
+
+    /// Non-admin cannot call set_ui_fee_factor.
+    #[test]
+    #[should_panic]
+    fn set_ui_fee_factor_non_admin_reverts() {
+        let env = Env::default();
+        // No mock_all_auths — require_auth() will reject any unauthorised call.
+        let admin = Address::generate(&env);
+        let rs    = Address::generate(&env);
+        let ds    = Address::generate(&env);
+
+        let handler = env.register(FeeHandler, ());
+        env.as_contract(&handler, || {
+            env.storage().instance().set(&InstanceKey::Initialized, &true);
+            env.storage().instance().set(&InstanceKey::Admin,     &admin);
+            env.storage().instance().set(&InstanceKey::RoleStore, &rs);
+            env.storage().instance().set(&InstanceKey::DataStore, &ds);
+        });
+
+        let ui_recv = Address::generate(&env);
+        // Must panic because no auth context is provided for `admin`.
+        FeeHandlerClient::new(&env, &handler).set_ui_fee_factor(&ui_recv, &100u128);
+    }
+
+    /// A factor above FLOAT_PRECISION (> 100%) must revert with InvalidAmount.
+    #[test]
+    #[should_panic]
+    fn set_ui_fee_factor_exceeds_bound_reverts() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        let too_large: u128 = gmx_math::FLOAT_PRECISION as u128 + 1;
+        FeeHandlerClient::new(&w.env, &w.handler)
+            .set_ui_fee_factor(&ui_recv, &too_large);
     }
 
     /// DataStore fee entries written before upgrade remain claimable after.
