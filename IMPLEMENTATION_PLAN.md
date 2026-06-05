@@ -48,17 +48,17 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 - **Callers**: All contracts validating roles (via `has_role`).
 - **Callees**: None.
 - **Emitted Events**: `RoleGranted`, `RoleRevoked` (implied).
-- **Upgrade Policy**: Upgradeable (Admin).
+- **Upgrade Policy**: Immutable.
 
 #### `data_store`
 - **Description**: Universal typed key-value database for market metadata, configs, and parameters.
-- **State Owned**: `InstanceKey::Admin`, `InstanceKey::RoleStore`, and arbitrary `BytesN<32> -> Value` mappings.
+- **State Owned**: `InstanceKey::RoleStore`, and arbitrary `BytesN<32> -> Value` mappings.
 - **Initialization Args**: `admin: Address, role_store: Address`
 - **Roles Checked**: `CONTROLLER` role required for all state-mutating (write) calls.
 - **Callers**: Handlers, factories, and utilities.
 - **Callees**: `role_store`.
 - **Emitted Events**: None.
-- **Upgrade Policy**: Upgradeable (Admin).
+- **Upgrade Policy**: Immutable.
 
 #### `oracle`
 - **Description**: Keeper-fed oracle that stores and signs token prices per ledger.
@@ -69,7 +69,7 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 - **Callers**: Handlers and readers.
 - **Callees**: `role_store`, `data_store`.
 - **Emitted Events**: `prices_set` (implied).
-- **Upgrade Policy**: Upgradeable (Admin).
+- **Upgrade Policy**: Immutable.
 
 ---
 
@@ -83,7 +83,7 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 - **Callers**: Keepers/Admin.
 - **Callees**: Deploys and initializes `market_token`. Writes market props to `data_store`.
 - **Emitted Events**: `wasm_set`, `mkt_new`.
-- **Upgrade Policy**: Upgradeable (Admin).
+- **Upgrade Policy**: Immutable.
 
 #### `market_token`
 - **Description**: SEP-41 compliant LP token representing pool ownership.
@@ -151,7 +151,7 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 - **Callers**: `exchange_router`, keepers.
 - **Callees**: `withdrawal_vault`, `market_token`, `data_store`, `oracle`, `role_store`.
 - **Emitted Events**: `wd_req`, `wd_exec`, `wd_fail`.
-- **Upgrade Policy**: Upgradeable (Admin).
+- **Upgrade Policy**: Immutable.
 
 #### `order_handler`
 - **Description**: Manages full order lifecycle, position updates, and execution routing.
@@ -181,7 +181,7 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 - **Callers**: Keepers.
 - **Callees**: `order_handler` (for position view and ADL execution), `data_store`, `oracle`, `role_store`.
 - **Emitted Events**: `adl_req`.
-- **Upgrade Policy**: Upgradeable (Admin).
+- **Upgrade Policy**: Immutable.
 
 #### `fee_handler`
 - **Description**: Claims accumulated protocol fees and manages fee distribution.
@@ -209,9 +209,9 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 
 #### `reader`
 - **Description**: Stateless read-only aggregate queries for UI and keepers.
-- **State Owned**: None (Stateless).
-- **Initialization Args**: None.
-- **Roles Checked**: None (Public view).
+- **State Owned**: `InstanceKey::Admin`, `InstanceKey::Initialized`.
+- **Initialization Args**: `admin: Address`
+- **Roles Checked**: None for views; admin auth required for upgrade.
 - **Callers**: Client UI, keepers.
 - **Callees**: `data_store`, `oracle` (via read-only calls).
 - **Emitted Events**: None.
@@ -219,11 +219,11 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 
 #### `exchange_router`
 - **Description**: Main entry point for user interactions. Supports atomic multicall.
-- **State Owned**: `InstanceKey::Admin`, `InstanceKey::RoleStore`, `InstanceKey::DataStore`, `InstanceKey::DepositHandler`, `InstanceKey::WithdrawalHandler`, `InstanceKey::OrderHandler`.
-- **Initialization Args**: `admin: Address, role_store: Address, data_store: Address, deposit_handler: Address, withdrawal_handler: Address, order_handler: Address`
-- **Roles Checked**: None (Public).
+- **State Owned**: `InstanceKey::Admin`, `InstanceKey::RoleStore`, `InstanceKey::DataStore`, `InstanceKey::DepositHandler`, `InstanceKey::WithdrawalHandler`, `InstanceKey::OrderHandler`, `InstanceKey::FeeHandler`, and pause flag.
+- **Initialization Args**: `admin: Address, role_store: Address, data_store: Address, deposit_handler: Address, withdrawal_handler: Address, order_handler: Address, fee_handler: Address`
+- **Roles Checked**: None for user entrypoints; admin auth required for pause/upgrade.
 - **Callers**: Users, frontends.
-- **Callees**: `deposit_handler`, `withdrawal_handler`, `order_handler`, SEP-41 token contracts.
+- **Callees**: `deposit_handler`, `withdrawal_handler`, `order_handler`, `fee_handler`, SEP-41 token contracts.
 - **Emitted Events**: None.
 - **Upgrade Policy**: Upgradeable (Admin).
 
@@ -277,5 +277,40 @@ the probability of execution failure during high-volatility periods.
 
 ---
 
-## 4. Scope and Deviations (Laying Groundwork for Issue #1 & #3)
-*(Detailed launch scope definitions and Solidity-to-Soroban deviations to be finalized by the secondary contributor).*
+## 4. Scope and Deviations (Issue #1/#3)
+
+### v1 Launch Scope
+
+The contracts repository owns the Soroban protocol layer only. The v1 contract scope is:
+
+- Isolated-market LP accounting, deposits, withdrawals, market tokens, and market factory.
+- Order creation, execution, cancellation, swaps, position increase/decrease, liquidation, and ADL execution.
+- Keeper-fed oracle prices with ed25519 signature verification.
+- Fee claiming, UI-fee accounting where implemented, referral storage, reader views, and exchange router multicall.
+- Testnet deployment/bootstrap workflows for contracts, test assets, roles, config keys, and price submission.
+
+Deferred from the v1 contracts scope:
+
+- Pyth VAA ingestion. The v1 oracle path is custom keeper signatures.
+- A production frontend, indexer, and off-chain keeper implementation.
+- On-chain governance/timelock contracts. Production admin control should use Stellar native multisig.
+- Broad protocol mutability. Only contracts with a Rust `upgrade` entrypoint are upgradeable.
+
+### Intentional GMX Synthetics Deviations
+
+| GMX/EVM pattern | SO4 Soroban decision |
+|---|---|
+| ERC-20 token assumptions | SEP-41 token clients and Stellar Asset Contracts. |
+| Shared data store as the dominant struct storage layer | Handler-local persistent storage for deposits, withdrawals, orders, and positions; `data_store` remains for config, pool accounting, lists, and shared values. |
+| EVM-style router and approvals | Router-push model: user token movement happens through `exchange_router` before request creation. Handlers snapshot vault receipts. |
+| Oracle integration | Ledger-scoped keeper-submitted prices with ed25519 verification; test helpers are feature-gated out of production builds. |
+| Upgradeability assumptions | Core stores and vaults are immutable unless code explicitly exposes `upgrade`. Upgrade authority is local contract admin, not `role_store`. |
+
+### Current Cleanup State
+
+`issues_v2.md` is now best treated as historical backlog input from the open-source program, not as the live implementation source of truth. The live source of truth is:
+
+- Architecture decisions: this document.
+- Operator and contributor documentation: `README.md`, `CONTRIBUTING.md`, and `mx/README.md`.
+- Security posture: `SECURITY_REVIEW.md`.
+- Actual implementation truth: the Rust code and test suite.

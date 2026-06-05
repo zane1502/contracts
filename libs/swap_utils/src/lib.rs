@@ -9,17 +9,14 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{Address, BytesN, Env, Vec};
-use gmx_types::{MarketProps, PriceProps};
 use gmx_keys::{
-    market_long_token_key, market_short_token_key,
-    market_index_token_key, max_swap_path_length_key,
-    claimable_fee_amount_key,
+    claimable_fee_amount_key, market_index_token_key, market_long_token_key,
+    market_short_token_key, max_swap_path_length_key,
 };
 use gmx_market_utils::apply_delta_to_pool_amount;
-use gmx_pricing_utils::{
-    get_swap_output_amount, apply_swap_impact_value, get_swap_price_impact,
-};
+use gmx_pricing_utils::{apply_swap_impact_value, get_swap_output_amount, get_swap_price_impact};
+use gmx_types::{MarketProps, PriceProps};
+use soroban_sdk::{Address, BytesN, Env, Vec};
 
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
@@ -38,7 +35,13 @@ trait IOracle {
 #[allow(dead_code)]
 #[soroban_sdk::contractclient(name = "MarketTokenClient")]
 trait IMarketToken {
-    fn withdraw_from_pool(env: Env, caller: Address, pool_token: Address, receiver: Address, amount: i128);
+    fn withdraw_from_pool(
+        env: Env,
+        caller: Address,
+        pool_token: Address,
+        receiver: Address,
+        amount: i128,
+    );
 }
 
 // ─── Single-hop swap ──────────────────────────────────────────────────────────
@@ -65,24 +68,27 @@ pub fn swap(
 
     // 2. Read prices from oracle
     let oracle_client = OracleClient::new(env, oracle);
-    let price_in_props  = oracle_client.get_primary_price(token_in);
+    let price_in_props = oracle_client.get_primary_price(token_in);
     let price_out_props = oracle_client.get_primary_price(&token_out);
-    let price_in  = price_in_props.mid_price();
+    let price_in = price_in_props.mid_price();
     let price_out = price_out_props.mid_price();
 
     // 3. Determine if this swap improves pool balance (for fee factor selection)
     let impact_usd = get_swap_price_impact(
-        env, data_store, market,
-        token_in, &token_out,
-        amount_in, price_in, price_out,
+        env, data_store, market, token_in, &token_out, amount_in, price_in, price_out,
     );
     let for_positive_impact = impact_usd >= 0;
 
     // 4. Compute output and fee
     let (amount_out, fee_amount) = get_swap_output_amount(
-        env, data_store, market,
-        token_in, &token_out,
-        amount_in, price_in, price_out,
+        env,
+        data_store,
+        market,
+        token_in,
+        &token_out,
+        amount_in,
+        price_in,
+        price_out,
         for_positive_impact,
     );
 
@@ -91,11 +97,13 @@ pub fn swap(
     }
 
     // 5. Apply swap impact to impact pool (denominated in token_out)
-    apply_swap_impact_value(env, data_store, caller, market, &token_out, price_out, impact_usd);
+    apply_swap_impact_value(
+        env, data_store, caller, market, &token_out, price_out, impact_usd,
+    );
 
     // 6. Update pool amounts; track swap fee in claimable_fee_amount_key so
     //    fee_handler.claim_fees sweeps all fee paths consistently.
-    apply_delta_to_pool_amount(env, data_store, caller, market, token_in,   amount_in);
+    apply_delta_to_pool_amount(env, data_store, caller, market, token_in, amount_in);
     apply_delta_to_pool_amount(env, data_store, caller, market, &token_out, -amount_out);
     if fee_amount > 0 {
         DataStoreClient::new(env, data_store).apply_delta_to_u128(
@@ -106,8 +114,12 @@ pub fn swap(
     }
 
     // 7. Transfer token_out from market_token pool → receiver
-    MarketTokenClient::new(env, &market.market_token)
-        .withdraw_from_pool(caller, &token_out, receiver, &amount_out);
+    MarketTokenClient::new(env, &market.market_token).withdraw_from_pool(
+        caller,
+        &token_out,
+        receiver,
+        &amount_out,
+    );
 
     (token_out, amount_out)
 }
@@ -160,9 +172,13 @@ pub fn swap_with_path(
 
     // 1. Validate path length
     let max_len = {
-        let raw = DataStoreClient::new(env, data_store)
-            .get_u128(&max_swap_path_length_key(env)) as usize;
-        if raw == 0 { 3 } else { raw } // default to 3 if not configured
+        let raw =
+            DataStoreClient::new(env, data_store).get_u128(&max_swap_path_length_key(env)) as usize;
+        if raw == 0 {
+            3
+        } else {
+            raw
+        } // default to 3 if not configured
     };
     if path_len as usize > max_len {
         soroban_sdk::panic_with_error!(env, soroban_sdk::Error::from_contract_error(2u32));
@@ -198,11 +214,14 @@ pub fn swap_with_path(
 
         // Load market props from data_store
         let ds = DataStoreClient::new(env, data_store);
-        let index_token = ds.get_address(&market_index_token_key(env, &market_token_addr))
+        let index_token = ds
+            .get_address(&market_index_token_key(env, &market_token_addr))
             .expect("market index token not found");
-        let long_token  = ds.get_address(&market_long_token_key(env, &market_token_addr))
+        let long_token = ds
+            .get_address(&market_long_token_key(env, &market_token_addr))
             .expect("market long token not found");
-        let short_token = ds.get_address(&market_short_token_key(env, &market_token_addr))
+        let short_token = ds
+            .get_address(&market_short_token_key(env, &market_token_addr))
             .expect("market short token not found");
 
         let market_props = MarketProps {
@@ -225,11 +244,17 @@ pub fn swap_with_path(
         };
 
         let (out_token, out_amount) = swap(
-            env, data_store, caller, oracle,
-            &market_props, &current_token, current_amount, &next_receiver,
+            env,
+            data_store,
+            caller,
+            oracle,
+            &market_props,
+            &current_token,
+            current_amount,
+            &next_receiver,
         );
 
-        current_token  = out_token;
+        current_token = out_token;
         current_amount = out_amount;
     }
 

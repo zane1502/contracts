@@ -2556,6 +2556,33 @@
                     "symbol": "U128"
                   },
                   {
+                    "bytes": "cb2ef7a05463bce9325c768a0595eecc4ae829d4a0df1c62f80e44c0e4641293"
+                  }
+                ]
+              },
+              "durability": "persistent",
+              "val": {
+                "u128": "200000"
+              }
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 4095
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+              "key": {
+                "vec": [
+                  {
+                    "symbol": "U128"
+                  },
+                  {
                     "bytes": "d1917cec78a2248e7a752cb9a20f0a8b5bbedbf94c630be890b678bc3900f615"
                   }
                 ]

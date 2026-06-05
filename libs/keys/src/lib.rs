@@ -244,11 +244,7 @@ pub fn withdrawal_key(env: &Env, nonce: u64) -> BytesN<32> {
 // ─── Borrowing keys ───────────────────────────────────────────────────────────
 
 /// sha256("CUMULATIVE_BORROWING_FACTOR" ‖ market ‖ is_long)
-pub fn cumulative_borrowing_factor_key(
-    env: &Env,
-    market: &Address,
-    is_long: bool,
-) -> BytesN<32> {
+pub fn cumulative_borrowing_factor_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "CUMULATIVE_BORROWING_FACTOR");
     push_addr(&mut b, env, market);
@@ -480,7 +476,11 @@ pub fn max_leverage_key(env: &Env, market: &Address) -> BytesN<32> {
     sha256(env, &b)
 }
 
-pub fn position_fee_factor_key(env: &Env, market: &Address, for_positive_impact: bool) -> BytesN<32> {
+pub fn position_fee_factor_key(
+    env: &Env,
+    market: &Address,
+    for_positive_impact: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "POSITION_FEE_FACTOR");
     push_addr(&mut b, env, market);
@@ -550,7 +550,12 @@ pub fn swap_impact_exponent_factor_key(env: &Env, market: &Address) -> BytesN<32
     sha256(env, &b)
 }
 
-pub fn max_pnl_factor_key(env: &Env, pnl_factor_type: &BytesN<32>, market: &Address, is_long: bool) -> BytesN<32> {
+pub fn max_pnl_factor_key(
+    env: &Env,
+    pnl_factor_type: &BytesN<32>,
+    market: &Address,
+    is_long: bool,
+) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR");
     b.extend_from_array(&pnl_factor_type.to_array());

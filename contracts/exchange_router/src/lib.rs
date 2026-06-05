@@ -13,14 +13,12 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error,
-    Address, BytesN, Env, Vec, token,
-};
-use gmx_types::{
-    CreateDepositParams, CreateWithdrawalParams, CreateOrderParams,
-};
 use gmx_keys::global_pause_key;
+use gmx_types::{CreateDepositParams, CreateOrderParams, CreateWithdrawalParams};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env, Vec,
+};
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -41,24 +39,24 @@ enum InstanceKey {
 
 #[contracttype]
 pub struct SendTokensParams {
-    pub token:    Address,
+    pub token: Address,
     pub receiver: Address,
-    pub amount:   i128,
+    pub amount: i128,
 }
 
 #[contracttype]
 pub struct UpdateOrderParams {
-    pub key:               BytesN<32>,
-    pub size_delta_usd:    i128,
-    pub acceptable_price:  i128,
-    pub trigger_price:     i128,
+    pub key: BytesN<32>,
+    pub size_delta_usd: i128,
+    pub acceptable_price: i128,
+    pub trigger_price: i128,
     pub min_output_amount: i128,
 }
 
 #[contracttype]
 pub struct ClaimFundingFeesParams {
     pub markets: Vec<Address>,
-    pub tokens:  Vec<Address>,
+    pub tokens: Vec<Address>,
 }
 
 // ─── Multicall action discriminant ────────────────────────────────────────────
@@ -84,9 +82,9 @@ pub enum RouterAction {
 #[repr(u32)]
 pub enum Error {
     AlreadyInitialized = 1,
-    NotInitialized     = 2,
-    Unauthorized       = 3,
-    Paused             = 4,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    Paused = 4,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
@@ -159,34 +157,65 @@ impl ExchangeRouter {
         if env.storage().instance().has(&InstanceKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&InstanceKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::Initialized, &true);
         env.storage().instance().set(&InstanceKey::Admin, &admin);
-        env.storage().instance().set(&InstanceKey::RoleStore, &role_store);
-        env.storage().instance().set(&InstanceKey::DataStore, &data_store);
-        env.storage().instance().set(&InstanceKey::DepositHandler, &deposit_handler);
-        env.storage().instance().set(&InstanceKey::WithdrawalHandler, &withdrawal_handler);
-        env.storage().instance().set(&InstanceKey::OrderHandler, &order_handler);
-        env.storage().instance().set(&InstanceKey::FeeHandler, &fee_handler);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::RoleStore, &role_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DataStore, &data_store);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::DepositHandler, &deposit_handler);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::WithdrawalHandler, &withdrawal_handler);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::OrderHandler, &order_handler);
+        env.storage()
+            .instance()
+            .set(&InstanceKey::FeeHandler, &fee_handler);
     }
 
     /// Upgrade the contract wasm. Only the stored admin may call this.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
     pub fn set_paused(env: Env, paused: bool) {
-        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
-        DataStoreClient::new(&env, &data_store).set_bool(&env.current_contract_address(), &global_pause_key(&env), &paused);
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap();
+        DataStoreClient::new(&env, &data_store).set_bool(
+            &env.current_contract_address(),
+            &global_pause_key(&env),
+            &paused,
+        );
     }
 
     fn require_not_paused(env: &Env) {
-        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
             .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
         let ds = DataStoreClient::new(env, &data_store);
         if ds.get_bool(&global_pause_key(env)) {
@@ -208,13 +237,25 @@ impl ExchangeRouter {
         caller.require_auth();
         Self::require_not_paused(&env);
 
-        let deposit_handler: Address   = env.storage().instance().get(&InstanceKey::DepositHandler)
+        let deposit_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DepositHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let withdrawal_handler: Address = env.storage().instance().get(&InstanceKey::WithdrawalHandler)
+        let withdrawal_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::WithdrawalHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let order_handler: Address     = env.storage().instance().get(&InstanceKey::OrderHandler)
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
-        let fee_handler: Address       = env.storage().instance().get(&InstanceKey::FeeHandler)
+        let fee_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::FeeHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
 
         let mut results: Vec<BytesN<32>> = Vec::new(&env);
@@ -226,8 +267,7 @@ impl ExchangeRouter {
             let action = actions.get(i).unwrap();
             match action {
                 RouterAction::SendTokens(p) => {
-                    token::Client::new(&env, &p.token)
-                        .transfer(&caller, &p.receiver, &p.amount);
+                    token::Client::new(&env, &p.token).transfer(&caller, &p.receiver, &p.amount);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateDeposit(p) => {
@@ -236,8 +276,7 @@ impl ExchangeRouter {
                     results.push_back(key);
                 }
                 RouterAction::CancelDeposit(key) => {
-                    DepositHandlerClient::new(&env, &deposit_handler)
-                        .cancel_deposit(&caller, &key);
+                    DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateWithdrawal(p) => {
@@ -251,8 +290,8 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CreateOrder(p) => {
-                    let key = OrderHandlerClient::new(&env, &order_handler)
-                        .create_order(&caller, &p);
+                    let key =
+                        OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &p);
                     results.push_back(key);
                 }
                 RouterAction::UpdateOrder(p) => {
@@ -267,8 +306,7 @@ impl ExchangeRouter {
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::CancelOrder(key) => {
-                    OrderHandlerClient::new(&env, &order_handler)
-                        .cancel_order(&caller, &key);
+                    OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
                     results.push_back(zero_key.clone());
                 }
                 RouterAction::ClaimFundingFees(p) => {
@@ -303,7 +341,9 @@ impl ExchangeRouter {
     /// Forward create_deposit to the deposit_handler.
     pub fn create_deposit(env: Env, caller: Address, params: CreateDepositParams) -> BytesN<32> {
         caller.require_auth();
-        let deposit_handler: Address = env.storage().instance()
+        let deposit_handler: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DepositHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         DepositHandlerClient::new(&env, &deposit_handler).create_deposit(&caller, &params)
@@ -312,7 +352,9 @@ impl ExchangeRouter {
     /// Forward cancel_deposit to the deposit_handler.
     pub fn cancel_deposit(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
-        let deposit_handler: Address = env.storage().instance()
+        let deposit_handler: Address = env
+            .storage()
+            .instance()
             .get(&InstanceKey::DepositHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         DepositHandlerClient::new(&env, &deposit_handler).cancel_deposit(&caller, &key);
@@ -325,17 +367,22 @@ impl ExchangeRouter {
         params: CreateWithdrawalParams,
     ) -> BytesN<32> {
         caller.require_auth();
-        let withdrawal_handler: Address = env.storage().instance()
-            .get(&InstanceKey::WithdrawalHandler).unwrap();
-        WithdrawalHandlerClient::new(&env, &withdrawal_handler)
-            .create_withdrawal(&caller, &params)
+        let withdrawal_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::WithdrawalHandler)
+            .unwrap();
+        WithdrawalHandlerClient::new(&env, &withdrawal_handler).create_withdrawal(&caller, &params)
     }
 
     /// Forward cancel_withdrawal to the withdrawal_handler.
     pub fn cancel_withdrawal(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
-        let withdrawal_handler: Address = env.storage().instance()
-            .get(&InstanceKey::WithdrawalHandler).unwrap();
+        let withdrawal_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::WithdrawalHandler)
+            .unwrap();
         WithdrawalHandlerClient::new(&env, &withdrawal_handler).cancel_withdrawal(&caller, &key);
     }
 
@@ -359,16 +406,22 @@ impl ExchangeRouter {
     /// Decrease / stop-loss / liquidation orders do not require a prior token send.
     pub fn create_order(env: Env, caller: Address, params: CreateOrderParams) -> BytesN<32> {
         caller.require_auth();
-        let order_handler: Address = env.storage().instance()
-            .get(&InstanceKey::OrderHandler).unwrap();
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap();
         OrderHandlerClient::new(&env, &order_handler).create_order(&caller, &params)
     }
 
     /// Forward update_order to the order_handler.
     pub fn update_order(env: Env, caller: Address, params: UpdateOrderParams) {
         caller.require_auth();
-        let order_handler: Address = env.storage().instance()
-            .get(&InstanceKey::OrderHandler).unwrap();
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap();
         OrderHandlerClient::new(&env, &order_handler).update_order(
             &caller,
             &params.key,
@@ -382,8 +435,11 @@ impl ExchangeRouter {
     /// Forward cancel_order to the order_handler.
     pub fn cancel_order(env: Env, caller: Address, key: BytesN<32>) {
         caller.require_auth();
-        let order_handler: Address = env.storage().instance()
-            .get(&InstanceKey::OrderHandler).unwrap();
+        let order_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::OrderHandler)
+            .unwrap();
         OrderHandlerClient::new(&env, &order_handler).cancel_order(&caller, &key);
     }
 
@@ -395,8 +451,11 @@ impl ExchangeRouter {
         tokens: Vec<Address>,
     ) {
         caller.require_auth();
-        let fee_handler: Address = env.storage().instance()
-            .get(&InstanceKey::FeeHandler).unwrap();
+        let fee_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::FeeHandler)
+            .unwrap();
         let fee_client = FeeHandlerClient::new(&env, &fee_handler);
         let len = markets.len();
         let mut i = 0u32;
@@ -412,7 +471,10 @@ impl ExchangeRouter {
 
     /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.
     pub fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128) {
-        let fee_handler: Address = env.storage().instance().get(&InstanceKey::FeeHandler)
+        let fee_handler: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::FeeHandler)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         FeeHandlerClient::new(&env, &fee_handler).set_ui_fee_factor(&ui_receiver, &factor);
     }
@@ -440,47 +502,49 @@ impl ExchangeRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env};
-    use role_store::{RoleStore, RoleStoreClient as RsClient};
     use data_store::{DataStore, DataStoreClient as DsClient};
-    use oracle::{Oracle, OracleClient as OClient};
-    use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
-    use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
-    use order_vault::{OrderVault, OrderVaultClient as OVClient};
     use deposit_handler::{DepositHandler, DepositHandlerClient};
-    use withdrawal_handler::{WithdrawalHandler, WithdrawalHandlerClient};
-    use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
+    use deposit_vault::{DepositVault, DepositVaultClient as DVClient};
+    use gmx_keys::roles;
+    use gmx_math::FLOAT_PRECISION;
+    use gmx_types::{
+        CreateDepositParams, CreateOrderParams, CreateWithdrawalParams, OrderType, TokenPrice,
+    };
     use liquidation_handler::{LiquidationHandler, LiquidationHandlerClient as LHClient};
     use market_token::{MarketToken, MarketTokenClient as MtClient};
-    use gmx_keys::roles;
-    use gmx_types::{TokenPrice, CreateDepositParams, CreateWithdrawalParams, CreateOrderParams, OrderType};
-    use gmx_math::FLOAT_PRECISION;
+    use oracle::{Oracle, OracleClient as OClient};
+    use order_handler::{OrderHandler, OrderHandlerClient as OHClient};
+    use order_vault::{OrderVault, OrderVaultClient as OVClient};
+    use role_store::{RoleStore, RoleStoreClient as RsClient};
+    use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Env};
+    use withdrawal_handler::{WithdrawalHandler, WithdrawalHandlerClient};
+    use withdrawal_vault::{WithdrawalVault, WithdrawalVaultClient as WVClient};
 
     const ONE_TOKEN: i128 = 10_000_000; // Stellar 7-decimal precision
 
     // ── Issue #101: shared full-protocol harness ──────────────────────────────
 
     struct World {
-        env:         Env,
-        admin:       Address,
-        keeper:      Address,
-        liq_keeper:  Address,
-        rs:          Address,
-        ds:          Address,
-        oracle:      Address,
-        dep_vault:   Address,
-        wth_vault:   Address,
-        ord_vault:   Address,
+        env: Env,
+        admin: Address,
+        keeper: Address,
+        liq_keeper: Address,
+        rs: Address,
+        ds: Address,
+        oracle: Address,
+        dep_vault: Address,
+        wth_vault: Address,
+        ord_vault: Address,
         dep_handler: Address,
         wth_handler: Address,
         ord_handler: Address,
         liq_handler: Address,
         #[allow(dead_code)]
-        router:      Address,
-        market_tk:   Address,
-        long_tk:     Address,
-        short_tk:    Address,
-        index_tk:    Address,
+        router: Address,
+        market_tk: Address,
+        long_tk: Address,
+        short_tk: Address,
+        index_tk: Address,
     }
 
     fn setup() -> World {
@@ -488,16 +552,16 @@ mod tests {
         env.mock_all_auths();
         env.cost_estimate().budget().reset_unlimited();
 
-        let admin      = Address::generate(&env);
-        let keeper     = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let keeper = Address::generate(&env);
         let liq_keeper = Address::generate(&env);
 
         // Role store
         let rs = env.register(RoleStore, ());
         let rs_c = RsClient::new(&env, &rs);
         rs_c.initialize(&admin);
-        rs_c.grant_role(&admin, &admin,      &roles::controller(&env));
-        rs_c.grant_role(&admin, &keeper,     &roles::order_keeper(&env));
+        rs_c.grant_role(&admin, &admin, &roles::controller(&env));
+        rs_c.grant_role(&admin, &keeper, &roles::order_keeper(&env));
         rs_c.grant_role(&admin, &liq_keeper, &roles::liquidation_keeper(&env));
 
         // Data store
@@ -520,39 +584,58 @@ mod tests {
         // Market token (LP token + pool custodian)
         let market_tk = env.register(MarketToken, ());
         MtClient::new(&env, &market_tk).initialize(
-            &admin, &rs, &7u32,
+            &admin,
+            &rs,
+            &7u32,
             &soroban_sdk::String::from_str(&env, "SO4 Market"),
             &soroban_sdk::String::from_str(&env, "GM"),
         );
 
         // Underlying tokens
-        let long_tk  = env.register_stellar_asset_contract_v2(admin.clone()).address();
-        let short_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let long_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let short_tk = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         let index_tk = Address::generate(&env);
 
         // Handlers
         let dep_handler = env.register(DepositHandler, ());
-        DepositHandlerClient::new(&env, &dep_handler)
-            .initialize(&admin, &rs, &ds, &oracle_addr, &dep_vault);
+        DepositHandlerClient::new(&env, &dep_handler).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &oracle_addr,
+            &dep_vault,
+        );
 
         let wth_handler = env.register(WithdrawalHandler, ());
-        WithdrawalHandlerClient::new(&env, &wth_handler)
-            .initialize(&admin, &rs, &ds, &oracle_addr, &wth_vault);
+        WithdrawalHandlerClient::new(&env, &wth_handler).initialize(
+            &admin,
+            &rs,
+            &ds,
+            &oracle_addr,
+            &wth_vault,
+        );
 
         let ord_handler = env.register(OrderHandler, ());
-        OHClient::new(&env, &ord_handler)
-            .initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
+        OHClient::new(&env, &ord_handler).initialize(&admin, &rs, &ds, &oracle_addr, &ord_vault);
 
         let liq_handler = env.register(LiquidationHandler, ());
-        LHClient::new(&env, &liq_handler)
-            .initialize(&admin, &rs, &ds, &oracle_addr, &ord_handler);
+        LHClient::new(&env, &liq_handler).initialize(&admin, &rs, &ds, &oracle_addr, &ord_handler);
 
         // Exchange router (fee_handler is unused in E2E tests — dummy address)
         let fee_handler_dummy = Address::generate(&env);
         let router = env.register(ExchangeRouter, ());
         ExchangeRouterClient::new(&env, &router).initialize(
-            &admin, &rs, &ds,
-            &dep_handler, &wth_handler, &ord_handler, &fee_handler_dummy,
+            &admin,
+            &rs,
+            &ds,
+            &dep_handler,
+            &wth_handler,
+            &ord_handler,
+            &fee_handler_dummy,
         );
 
         // Grant CONTROLLER to all handlers
@@ -563,50 +646,117 @@ mod tests {
 
         // Register market in DataStore
         let ds_c = DsClient::new(&env, &ds);
-        ds_c.set_address(&admin, &gmx_keys::market_index_token_key(&env, &market_tk), &index_tk);
-        ds_c.set_address(&admin, &gmx_keys::market_long_token_key(&env, &market_tk),  &long_tk);
-        ds_c.set_address(&admin, &gmx_keys::market_short_token_key(&env, &market_tk), &short_tk);
+        ds_c.set_address(
+            &admin,
+            &gmx_keys::market_index_token_key(&env, &market_tk),
+            &index_tk,
+        );
+        ds_c.set_address(
+            &admin,
+            &gmx_keys::market_long_token_key(&env, &market_tk),
+            &long_tk,
+        );
+        ds_c.set_address(
+            &admin,
+            &gmx_keys::market_short_token_key(&env, &market_tk),
+            &short_tk,
+        );
 
         // Market config: 0.1% position fee, 1% min collateral factor, 100x max leverage
-        let fee_factor     = FLOAT_PRECISION / 1000;
+        let fee_factor = FLOAT_PRECISION / 1000;
         let min_col_factor = FLOAT_PRECISION / 100;
-        ds_c.set_u128(&admin, &gmx_keys::position_fee_factor_key(&env, &market_tk, true),  &(fee_factor as u128));
-        ds_c.set_u128(&admin, &gmx_keys::position_fee_factor_key(&env, &market_tk, false), &(fee_factor as u128));
-        ds_c.set_u128(&admin, &gmx_keys::min_collateral_factor_key(&env, &market_tk), &(min_col_factor as u128));
-        ds_c.set_u128(&admin, &gmx_keys::max_leverage_key(&env, &market_tk), &(100 * FLOAT_PRECISION as u128));
+        ds_c.set_u128(
+            &admin,
+            &gmx_keys::position_fee_factor_key(&env, &market_tk, true),
+            &(fee_factor as u128),
+        );
+        ds_c.set_u128(
+            &admin,
+            &gmx_keys::position_fee_factor_key(&env, &market_tk, false),
+            &(fee_factor as u128),
+        );
+        ds_c.set_u128(
+            &admin,
+            &gmx_keys::min_collateral_factor_key(&env, &market_tk),
+            &(min_col_factor as u128),
+        );
+        ds_c.set_u128(
+            &admin,
+            &gmx_keys::max_leverage_key(&env, &market_tk),
+            &(100 * FLOAT_PRECISION as u128),
+        );
 
         World {
-            env, admin, keeper, liq_keeper,
-            rs, ds, oracle: oracle_addr,
-            dep_vault, wth_vault, ord_vault,
-            dep_handler, wth_handler, ord_handler, liq_handler,
-            router, market_tk, long_tk, short_tk, index_tk,
+            env,
+            admin,
+            keeper,
+            liq_keeper,
+            rs,
+            ds,
+            oracle: oracle_addr,
+            dep_vault,
+            wth_vault,
+            ord_vault,
+            dep_handler,
+            wth_handler,
+            ord_handler,
+            liq_handler,
+            router,
+            market_tk,
+            long_tk,
+            short_tk,
+            index_tk,
         }
     }
 
     fn set_prices(w: &World, index_usd: i128) {
         let fp = FLOAT_PRECISION;
-        OClient::new(&w.env, &w.oracle).set_prices_simple(&w.keeper, &soroban_sdk::Vec::from_array(&w.env, [
-            TokenPrice { token: w.long_tk.clone(),  min: index_usd, max: index_usd },
-            TokenPrice { token: w.short_tk.clone(), min: fp,        max: fp        },
-            TokenPrice { token: w.index_tk.clone(), min: index_usd, max: index_usd },
-        ]));
+        OClient::new(&w.env, &w.oracle).set_prices_simple(
+            &w.keeper,
+            &soroban_sdk::Vec::from_array(
+                &w.env,
+                [
+                    TokenPrice {
+                        token: w.long_tk.clone(),
+                        min: index_usd,
+                        max: index_usd,
+                    },
+                    TokenPrice {
+                        token: w.short_tk.clone(),
+                        min: fp,
+                        max: fp,
+                    },
+                    TokenPrice {
+                        token: w.index_tk.clone(),
+                        min: index_usd,
+                        max: index_usd,
+                    },
+                ],
+            ),
+        );
     }
 
     /// Mint tokens to `lp`, deposit them through the deposit handler, execute, return minted LP balance.
     fn provide_liquidity(w: &World, lp: &Address, long_amt: i128, short_amt: i128) -> i128 {
-        if long_amt  > 0 { StellarAssetClient::new(&w.env, &w.long_tk).mint(lp, &long_amt);  }
-        if short_amt > 0 { StellarAssetClient::new(&w.env, &w.short_tk).mint(lp, &short_amt); }
-        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(lp, &CreateDepositParams {
-            receiver:            lp.clone(),
-            market:              w.market_tk.clone(),
-            initial_long_token:  w.long_tk.clone(),
-            initial_short_token: w.short_tk.clone(),
-            long_token_amount:   long_amt,
-            short_token_amount:  short_amt,
-            min_market_tokens:   1,
-            execution_fee:       0,
-        });
+        if long_amt > 0 {
+            StellarAssetClient::new(&w.env, &w.long_tk).mint(lp, &long_amt);
+        }
+        if short_amt > 0 {
+            StellarAssetClient::new(&w.env, &w.short_tk).mint(lp, &short_amt);
+        }
+        let key = DepositHandlerClient::new(&w.env, &w.dep_handler).create_deposit(
+            lp,
+            &CreateDepositParams {
+                receiver: lp.clone(),
+                market: w.market_tk.clone(),
+                initial_long_token: w.long_tk.clone(),
+                initial_short_token: w.short_tk.clone(),
+                long_token_amount: long_amt,
+                short_token_amount: short_amt,
+                min_market_tokens: 1,
+                execution_fee: 0,
+            },
+        );
         DepositHandlerClient::new(&w.env, &w.dep_handler).execute_deposit(&w.keeper, &key);
         MtClient::new(&w.env, &w.market_tk).balance(lp)
     }
@@ -615,23 +765,29 @@ mod tests {
     /// then create and execute a MarketIncrease long order.
     fn open_long_position(w: &World, user: &Address, collateral_tokens: i128, size_usd: i128) {
         StellarAssetClient::new(&w.env, &w.long_tk).mint(user, &collateral_tokens);
-        soroban_sdk::token::Client::new(&w.env, &w.long_tk)
-            .transfer(user, &w.ord_vault, &collateral_tokens);
-        let hc  = OHClient::new(&w.env, &w.ord_handler);
-        let key = hc.create_order(user, &CreateOrderParams {
-            receiver:                 user.clone(),
-            market:                   w.market_tk.clone(),
-            initial_collateral_token: w.long_tk.clone(),
-            swap_path:                soroban_sdk::Vec::new(&w.env),
-            size_delta_usd:           size_usd,
-            collateral_delta_amount:  collateral_tokens,
-            trigger_price:            0,
-            acceptable_price:         0,
-            execution_fee:            0,
-            min_output_amount:        0,
-            order_type:               OrderType::MarketIncrease,
-            is_long:                  true,
-        });
+        soroban_sdk::token::Client::new(&w.env, &w.long_tk).transfer(
+            user,
+            &w.ord_vault,
+            &collateral_tokens,
+        );
+        let hc = OHClient::new(&w.env, &w.ord_handler);
+        let key = hc.create_order(
+            user,
+            &CreateOrderParams {
+                receiver: user.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: soroban_sdk::Vec::new(&w.env),
+                size_delta_usd: size_usd,
+                collateral_delta_amount: collateral_tokens,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
+            },
+        );
         hc.execute_order(&w.keeper, &key);
     }
 
@@ -641,13 +797,13 @@ mod tests {
     /// Asserts user recovers tokens and pool returns to zero (single-depositor, no trades).
     #[test]
     fn e2e_deposit_then_withdraw_recovers_tokens() {
-        let w  = setup();
+        let w = setup();
         let fp = FLOAT_PRECISION;
         let lp = Address::generate(&w.env);
 
         set_prices(&w, 2_000 * fp);
 
-        let long_amt  = 5 * ONE_TOKEN;
+        let long_amt = 5 * ONE_TOKEN;
         let short_amt = 5_000 * ONE_TOKEN;
 
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp, &long_amt);
@@ -663,7 +819,11 @@ mod tests {
             "long pool must match deposit"
         );
         assert_eq!(
-            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.short_tk)),
+            ds_c.get_u128(&gmx_keys::pool_amount_key(
+                &w.env,
+                &w.market_tk,
+                &w.short_tk
+            )),
             short_amt as u128,
             "short pool must match deposit"
         );
@@ -671,26 +831,32 @@ mod tests {
         set_prices(&w, 2_000 * fp);
 
         // Withdraw all LP tokens
-        let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
-            .create_withdrawal(&lp, &CreateWithdrawalParams {
-                receiver:               lp.clone(),
-                market:                 w.market_tk.clone(),
-                market_token_amount:    lp_tokens,
-                min_long_token_amount:  0,
+        let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &lp,
+            &CreateWithdrawalParams {
+                receiver: lp.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_tokens,
+                min_long_token_amount: 0,
                 min_short_token_amount: 0,
-                execution_fee:          0,
-            });
+                execution_fee: 0,
+            },
+        );
         WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
             .execute_withdrawal(&w.keeper, &wth_key);
 
         assert_eq!(
-            MtClient::new(&w.env, &w.market_tk).balance(&lp), 0,
+            MtClient::new(&w.env, &w.market_tk).balance(&lp),
+            0,
             "LP tokens must be fully burned after withdrawal"
         );
 
-        let long_back  = StellarAssetClient::new(&w.env, &w.long_tk).balance(&lp);
+        let long_back = StellarAssetClient::new(&w.env, &w.long_tk).balance(&lp);
         let short_back = StellarAssetClient::new(&w.env, &w.short_tk).balance(&lp);
-        assert!(long_back > 0 || short_back > 0, "user must recover tokens after withdrawal");
+        assert!(
+            long_back > 0 || short_back > 0,
+            "user must recover tokens after withdrawal"
+        );
 
         // Pool returns to zero (single depositor, no trades — no rounding loss)
         assert_eq!(
@@ -699,7 +865,11 @@ mod tests {
             "long pool must return to zero after full withdrawal"
         );
         assert_eq!(
-            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.short_tk)),
+            ds_c.get_u128(&gmx_keys::pool_amount_key(
+                &w.env,
+                &w.market_tk,
+                &w.short_tk
+            )),
             0,
             "short pool must return to zero after full withdrawal"
         );
@@ -711,16 +881,16 @@ mod tests {
     /// → LP withdraws. Pool accounting must be consistent at every step.
     #[test]
     fn e2e_deposit_trade_withdraw_pool_accounting() {
-        let w       = setup();
-        let fp      = FLOAT_PRECISION;
+        let w = setup();
+        let fp = FLOAT_PRECISION;
         let lp_user = Address::generate(&w.env);
-        let trader  = Address::generate(&w.env);
+        let trader = Address::generate(&w.env);
 
         let entry_price = 2_000 * fp;
         set_prices(&w, entry_price);
 
         // LP provides deep liquidity so the pool can pay out PnL if needed
-        let lp_long_amt  = 10 * ONE_TOKEN;
+        let lp_long_amt = 10 * ONE_TOKEN;
         let lp_short_amt = 10_000 * ONE_TOKEN;
         StellarAssetClient::new(&w.env, &w.long_tk).mint(&lp_user, &lp_long_amt);
         StellarAssetClient::new(&w.env, &w.short_tk).mint(&lp_user, &lp_short_amt);
@@ -730,24 +900,29 @@ mod tests {
         let ds_c = DsClient::new(&w.env, &w.ds);
 
         // Pool accounting after deposit
-        let pool_long_post_dep = ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
-        assert_eq!(pool_long_post_dep, lp_long_amt as u128, "long pool matches deposit");
+        let pool_long_post_dep =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
+        assert_eq!(
+            pool_long_post_dep, lp_long_amt as u128,
+            "long pool matches deposit"
+        );
 
         set_prices(&w, entry_price);
 
         // Trader opens 2x leveraged long position
         let collateral = ONE_TOKEN;
-        let size_usd   = 4_000 * fp;
+        let size_usd = 4_000 * fp;
         open_long_position(&w, &trader, collateral, size_usd);
 
-        let pos_key  = gmx_keys::position_key(&w.env, &trader, &w.market_tk, &w.long_tk, true);
+        let pos_key = gmx_keys::position_key(&w.env, &trader, &w.market_tk, &w.long_tk, true);
         let position = OHClient::new(&w.env, &w.ord_handler)
             .get_position(&pos_key)
             .expect("position must exist after MarketIncrease");
         assert!(position.size_in_usd > 0, "position size must be positive");
 
         // Pool grew: collateral moved from vault into pool
-        let pool_long_post_open = ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
+        let pool_long_post_open =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
         assert!(
             pool_long_post_open > pool_long_post_dep,
             "pool must grow when collateral is added on position open"
@@ -756,7 +931,8 @@ mod tests {
         // On-chain balance of market_tk must be >= DataStore pool record.
         // DataStore tracks the LP portion + fees; position collateral is held on-chain
         // but accounted separately through open interest, not pool_amount_key.
-        let on_chain_long = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.market_tk);
+        let on_chain_long =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.market_tk);
         assert!(
             on_chain_long as u128 >= pool_long_post_open,
             "on-chain balance must be >= DataStore pool amount (pool is always fully backed)"
@@ -764,36 +940,46 @@ mod tests {
 
         // Trader closes position at same price (break-even; trader pays fees)
         set_prices(&w, entry_price);
-        let close_key = OHClient::new(&w.env, &w.ord_handler).create_order(&trader, &CreateOrderParams {
-            receiver:                 trader.clone(),
-            market:                   w.market_tk.clone(),
-            initial_collateral_token: w.long_tk.clone(),
-            swap_path:                soroban_sdk::Vec::new(&w.env),
-            size_delta_usd:           position.size_in_usd,
-            collateral_delta_amount:  0, // ignored by decrease_position logic
-            trigger_price:            0,
-            acceptable_price:         0,
-            execution_fee:            0,
-            min_output_amount:        0,
-            order_type:               OrderType::MarketDecrease,
-            is_long:                  true,
-        });
+        let close_key = OHClient::new(&w.env, &w.ord_handler).create_order(
+            &trader,
+            &CreateOrderParams {
+                receiver: trader.clone(),
+                market: w.market_tk.clone(),
+                initial_collateral_token: w.long_tk.clone(),
+                swap_path: soroban_sdk::Vec::new(&w.env),
+                size_delta_usd: position.size_in_usd,
+                collateral_delta_amount: 0, // ignored by decrease_position logic
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketDecrease,
+                is_long: true,
+            },
+        );
         OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &close_key);
 
         // Position must be fully closed
         assert!(
-            OHClient::new(&w.env, &w.ord_handler).get_position(&pos_key).is_none(),
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_position(&pos_key)
+                .is_none(),
             "position must be removed after full MarketDecrease"
         );
 
         // Trader received collateral back (collateral minus fees)
         let trader_bal = StellarAssetClient::new(&w.env, &w.long_tk).balance(&trader);
-        assert!(trader_bal > 0, "trader must receive collateral back after closing position");
+        assert!(
+            trader_bal > 0,
+            "trader must receive collateral back after closing position"
+        );
 
         // After close: position collateral is returned to trader, so on-chain balance
         // should now equal pool_amount_key (no open positions remain).
-        let pool_long_post_close  = ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
-        let on_chain_long_close   = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.market_tk);
+        let pool_long_post_close =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
+        let on_chain_long_close =
+            soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.market_tk);
         assert_eq!(
             pool_long_post_close, on_chain_long_close as u128,
             "DataStore pool must equal on-chain balance after all positions are closed"
@@ -806,32 +992,49 @@ mod tests {
 
         // LP withdraws all LP tokens
         set_prices(&w, entry_price);
-        let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
-            .create_withdrawal(&lp_user, &CreateWithdrawalParams {
-                receiver:               lp_user.clone(),
-                market:                 w.market_tk.clone(),
-                market_token_amount:    lp_tokens,
-                min_long_token_amount:  0,
+        let wth_key = WithdrawalHandlerClient::new(&w.env, &w.wth_handler).create_withdrawal(
+            &lp_user,
+            &CreateWithdrawalParams {
+                receiver: lp_user.clone(),
+                market: w.market_tk.clone(),
+                market_token_amount: lp_tokens,
+                min_long_token_amount: 0,
                 min_short_token_amount: 0,
-                execution_fee:          0,
-            });
+                execution_fee: 0,
+            },
+        );
         WithdrawalHandlerClient::new(&w.env, &w.wth_handler)
             .execute_withdrawal(&w.keeper, &wth_key);
 
         assert_eq!(
-            MtClient::new(&w.env, &w.market_tk).balance(&lp_user), 0,
+            MtClient::new(&w.env, &w.market_tk).balance(&lp_user),
+            0,
             "LP tokens must be burned after withdrawal"
         );
 
-        let lp_long_back  = StellarAssetClient::new(&w.env, &w.long_tk).balance(&lp_user);
+        let lp_long_back = StellarAssetClient::new(&w.env, &w.long_tk).balance(&lp_user);
         let lp_short_back = StellarAssetClient::new(&w.env, &w.short_tk).balance(&lp_user);
-        assert!(lp_long_back > 0 || lp_short_back > 0, "LP must recover tokens after withdrawal");
+        assert!(
+            lp_long_back > 0 || lp_short_back > 0,
+            "LP must recover tokens after withdrawal"
+        );
 
         // Pool near-zero after full LP exit (within 1 unit rounding tolerance)
-        let pool_long_final  = ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
-        let pool_short_final = ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.short_tk));
-        assert!(pool_long_final  <= 1, "long pool must return near baseline after full LP withdrawal");
-        assert!(pool_short_final <= 1, "short pool must return near baseline after full LP withdrawal");
+        let pool_long_final =
+            ds_c.get_u128(&gmx_keys::pool_amount_key(&w.env, &w.market_tk, &w.long_tk));
+        let pool_short_final = ds_c.get_u128(&gmx_keys::pool_amount_key(
+            &w.env,
+            &w.market_tk,
+            &w.short_tk,
+        ));
+        assert!(
+            pool_long_final <= 1,
+            "long pool must return near baseline after full LP withdrawal"
+        );
+        assert!(
+            pool_short_final <= 1,
+            "short pool must return near baseline after full LP withdrawal"
+        );
     }
 
     // ── Issue #104: liquidation E2E through deployed-style clients ────────────
@@ -841,9 +1044,9 @@ mod tests {
     /// not a direct call to the position utility library).
     #[test]
     fn e2e_client_liquidation_underwater_succeeds() {
-        let w      = setup();
-        let fp     = FLOAT_PRECISION;
-        let lp     = Address::generate(&w.env);
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let lp = Address::generate(&w.env);
         let trader = Address::generate(&w.env);
 
         let entry_price = 2_000 * fp;
@@ -857,12 +1060,14 @@ mod tests {
 
         // Trader opens 10x leveraged long
         let collateral = ONE_TOKEN;
-        let size_usd   = 20_000 * fp;
+        let size_usd = 20_000 * fp;
         open_long_position(&w, &trader, collateral, size_usd);
 
         let pos_key = gmx_keys::position_key(&w.env, &trader, &w.market_tk, &w.long_tk, true);
         assert!(
-            OHClient::new(&w.env, &w.ord_handler).get_position(&pos_key).is_some(),
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_position(&pos_key)
+                .is_some(),
             "position must exist before liquidation"
         );
 
@@ -870,16 +1075,27 @@ mod tests {
         let crash_price = 100 * fp;
         set_prices(&w, crash_price);
 
-        let is_liq = LHClient::new(&w.env, &w.liq_handler)
-            .check_liquidatable(&trader, &w.market_tk, &w.long_tk, &true);
+        let is_liq = LHClient::new(&w.env, &w.liq_handler).check_liquidatable(
+            &trader,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
         assert!(is_liq, "position must be liquidatable after price crash");
 
         // Liquidate via client (deployed-style invocation)
-        LHClient::new(&w.env, &w.liq_handler)
-            .liquidate_position(&w.liq_keeper, &trader, &w.market_tk, &w.long_tk, &true);
+        LHClient::new(&w.env, &w.liq_handler).liquidate_position(
+            &w.liq_keeper,
+            &trader,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
 
         assert!(
-            OHClient::new(&w.env, &w.ord_handler).get_position(&pos_key).is_none(),
+            OHClient::new(&w.env, &w.ord_handler)
+                .get_position(&pos_key)
+                .is_none(),
             "position key must be removed from order_handler storage after liquidation"
         );
     }
@@ -888,9 +1104,9 @@ mod tests {
     #[test]
     #[should_panic]
     fn e2e_client_liquidation_healthy_reverts() {
-        let w      = setup();
-        let fp     = FLOAT_PRECISION;
-        let lp     = Address::generate(&w.env);
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let lp = Address::generate(&w.env);
         let trader = Address::generate(&w.env);
 
         let entry_price = 2_000 * fp;
@@ -909,8 +1125,13 @@ mod tests {
         set_prices(&w, entry_price);
 
         // Must panic with NotLiquidatable
-        LHClient::new(&w.env, &w.liq_handler)
-            .liquidate_position(&w.liq_keeper, &trader, &w.market_tk, &w.long_tk, &true);
+        LHClient::new(&w.env, &w.liq_handler).liquidate_position(
+            &w.liq_keeper,
+            &trader,
+            &w.market_tk,
+            &w.long_tk,
+            &true,
+        );
     }
 
     // ── Issue #135: Router multicall E2E tests ────────────────────────────────
@@ -920,9 +1141,9 @@ mod tests {
     /// model (send-first, then create), and the resulting key is executable.
     #[test]
     fn e2e_multicall_send_tokens_then_create_order_succeeds() {
-        let w      = setup();
-        let fp     = FLOAT_PRECISION;
-        let lp     = Address::generate(&w.env);
+        let w = setup();
+        let fp = FLOAT_PRECISION;
+        let lp = Address::generate(&w.env);
         let trader = Address::generate(&w.env);
 
         let entry_price = 2_000 * fp;
@@ -946,23 +1167,23 @@ mod tests {
         let actions = soroban_sdk::vec![
             &w.env,
             RouterAction::SendTokens(SendTokensParams {
-                token:    w.long_tk.clone(),
+                token: w.long_tk.clone(),
                 receiver: w.ord_vault.clone(),
-                amount:   collateral,
+                amount: collateral,
             }),
             RouterAction::CreateOrder(gmx_types::CreateOrderParams {
-                receiver:                 trader.clone(),
-                market:                   w.market_tk.clone(),
+                receiver: trader.clone(),
+                market: w.market_tk.clone(),
                 initial_collateral_token: w.long_tk.clone(),
-                swap_path:                soroban_sdk::Vec::new(&w.env),
-                size_delta_usd:           4_000 * fp,
-                collateral_delta_amount:  collateral,
-                trigger_price:            0,
-                acceptable_price:         0,
-                execution_fee:            0,
-                min_output_amount:        0,
-                order_type:               OrderType::MarketIncrease,
-                is_long:                  true,
+                swap_path: soroban_sdk::Vec::new(&w.env),
+                size_delta_usd: 4_000 * fp,
+                collateral_delta_amount: collateral,
+                trigger_price: 0,
+                acceptable_price: 0,
+                execution_fee: 0,
+                min_output_amount: 0,
+                order_type: OrderType::MarketIncrease,
+                is_long: true,
             }),
         ];
 
@@ -972,14 +1193,24 @@ mod tests {
         // First result is zero_key (SendTokens), second is the created order key
         assert_eq!(results.len(), 2);
         let zero_key = soroban_sdk::BytesN::from_array(&w.env, &[0u8; 32]);
-        assert_eq!(results.get(0).unwrap(), zero_key, "SendTokens result must be zero_key");
+        assert_eq!(
+            results.get(0).unwrap(),
+            zero_key,
+            "SendTokens result must be zero_key"
+        );
 
         let order_key = results.get(1).unwrap();
-        assert_ne!(order_key, zero_key, "CreateOrder must return a non-zero order key");
+        assert_ne!(
+            order_key, zero_key,
+            "CreateOrder must return a non-zero order key"
+        );
 
         // Trader's collateral has moved to the vault
         let trader_bal_after = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&trader);
-        assert_eq!(trader_bal_after, 0, "trader collateral must be in vault after multicall");
+        assert_eq!(
+            trader_bal_after, 0,
+            "trader collateral must be in vault after multicall"
+        );
 
         // Execute the order and verify a position was opened
         OHClient::new(&w.env, &w.ord_handler).execute_order(&w.keeper, &order_key);
@@ -988,7 +1219,10 @@ mod tests {
         let position = OHClient::new(&w.env, &w.ord_handler)
             .get_position(&pos_key)
             .expect("position must exist after multicall + execute_order");
-        assert!(position.size_in_usd > 0, "position must have positive size after successful multicall");
+        assert!(
+            position.size_in_usd > 0,
+            "position must have positive size after successful multicall"
+        );
     }
 
     /// Atomicity guarantee: if any step in a multicall panics, all preceding
@@ -996,8 +1230,8 @@ mod tests {
     /// CancelOrder (non-existent key) panics, rolling back the token transfer.
     #[test]
     fn e2e_multicall_failed_step_reverts_preceding_steps() {
-        let w      = setup();
-        let lp     = Address::generate(&w.env);
+        let w = setup();
+        let lp = Address::generate(&w.env);
         let trader = Address::generate(&w.env);
 
         set_prices(&w, 2_000 * FLOAT_PRECISION);
@@ -1023,7 +1257,7 @@ mod tests {
         let actions = soroban_sdk::vec![
             &w.env,
             RouterAction::SendTokens(SendTokensParams {
-                token:    w.long_tk.clone(),
+                token: w.long_tk.clone(),
                 receiver: w.ord_vault.clone(),
                 amount,
             }),
@@ -1047,6 +1281,9 @@ mod tests {
 
         // Vault must hold nothing (transfer also reverted)
         let vault_bal = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&w.ord_vault);
-        assert_eq!(vault_bal, 0, "order_vault must hold nothing after multicall reverts");
+        assert_eq!(
+            vault_bal, 0,
+            "order_vault must hold nothing after multicall reverts"
+        );
     }
 }

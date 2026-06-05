@@ -9,9 +9,9 @@ This security review provides an in-depth audit of the admin key custody, role a
 The SO4.market protocol utilizes a robust, permissioned access-control design governed by the `role_store` contract. However, the concentration of administrative privileges presents high-value targets for key compromise. 
 
 This audit reveals a **critical divergence** between the protocol documentation (`README.md`) and the Rust source code:
-* **Documentation Claim:** All core contracts (except `market_token`) are documented as upgradeable via an admin-gated Wasm swap.
-* **Rust Reality:** Only **three (3)** contracts actually implement the `upgrade` function in Rust: `order_handler`, `deposit_handler`, and `liquidation_handler`.
-* **Security Finding:** All other contracts—including core infrastructure like `role_store` and `data_store`—are **functionally immutable**. This is a **highly favorable security characteristic** that limits the Wasm upgrade attack vector to isolated execution handlers.
+* **Documentation Claim:** Older docs implied broad protocol upgradeability.
+* **Rust Reality:** Seven contracts currently implement the `upgrade` function in Rust: `deposit_handler`, `order_handler`, `liquidation_handler`, `fee_handler`, `referral_storage`, `reader`, and `exchange_router`.
+* **Security Finding:** Core infrastructure and vault contracts—including `role_store`, `data_store`, `oracle`, and the custodial vaults—are **functionally immutable**. This is a favorable security characteristic because it limits the Wasm upgrade attack vector away from the raw storage and custody layer.
 
 To mitigate administrative key compromise and single-point-of-failure risks, this report details operational and design practices, including **Stellar's native account-level multi-signature system**, while providing a rationale for deferring complex on-chain timelock smart contracts.
 
@@ -63,13 +63,17 @@ pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
 * **No `set_admin` Endpoint:** There is no function inside the handler contracts to update `InstanceKey::Admin` after initialization. If the private key corresponding to `InstanceKey::Admin` is lost, the contract is locked forever against upgrades.
 
 ### 3.2 Audit of Upgrade Implementations
-A workspace-wide code audit confirms that **only three contracts** implement Wasm upgrade capabilities:
+A workspace-wide code audit confirms that only the contracts listed below implement Wasm upgrade capabilities:
 
 | Contract | Implements `pub fn upgrade` | Upgrade Authority | State Impact |
 |---|---|---|---|
 | `order_handler` | **✅ Yes** | Local `Admin` Address | High (Position storage, trade execution) |
 | `deposit_handler` | **✅ Yes** | Local `Admin` Address | Medium (LP minting, deposit queues) |
 | `liquidation_handler` | **✅ Yes** | Local `Admin` Address | Medium (Liquidation routing) |
+| `fee_handler` | **✅ Yes** | Local `Admin` Address | Medium (Fee claiming/config) |
+| `referral_storage` | **✅ Yes** | Local `Admin` Address | Medium (Referral mappings and tiers) |
+| `reader` | **✅ Yes** | Local `Admin` Address | Low (View aggregation) |
+| `exchange_router` | **✅ Yes** | Local `Admin` Address | High (User entrypoint and pause control) |
 | `role_store` | ❌ No (Immutable) | — | None (Cannot swap ACL rules) |
 | `data_store` | ❌ No (Immutable) | — | None (Cannot swap database KV structure) |
 | `oracle` | ❌ No (Immutable) | — | None (Price feeds are stable) |
@@ -79,10 +83,6 @@ A workspace-wide code audit confirms that **only three contracts** implement Was
 | `order_vault` | ❌ No (Immutable) | — | None (Custodian vault is immutable) |
 | `withdrawal_handler`| ❌ No (Immutable) | — | None |
 | `adl_handler` | ❌ No (Immutable) | — | None |
-| `fee_handler` | ❌ No (Immutable) | — | None |
-| `referral_storage` | ❌ No (Immutable) | — | None |
-| `reader` | ❌ No (Immutable) | — | None |
-| `exchange_router` | ❌ No (Immutable) | — | None |
 
 > [!TIP]
 > **Audit Conclusion on Immutability:**

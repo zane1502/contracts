@@ -18,6 +18,42 @@ The protocol implements an isolated-market LP model with two-step keeper executi
 
 ---
 
+## Current Scope
+
+This repository is the Soroban contracts package for the SO4.market GMX Synthetics port. The community issue campaign is over; treat `issues_v2.md` as a historical backlog, not as the source of live project truth.
+
+### v1 contracts scope
+
+| Area | v1 status |
+|---|---|
+| Isolated markets, LP mint/burn, deposits, withdrawals | In scope |
+| Market, limit, stop, and swap order lifecycle | In scope |
+| Liquidation, ADL execution, fee claiming, referral storage | In scope |
+| Reader views and router multicall | In scope |
+| Custom keeper-signed oracle prices | In scope |
+| Testnet deployment, token bootstrap, and operator Make workflows | In scope |
+
+### Deferred or non-v1 scope
+
+| Area | Decision |
+|---|---|
+| Pyth VAA oracle ingestion | Deferred. v1 uses the custom keeper-signature oracle path. |
+| Full production frontend and indexer | Deferred from this contracts repository. |
+| On-chain governance/timelock | Deferred; production admin policy should use Stellar native multisig. |
+| Broad contract mutability | Rejected for v1. Only contracts with actual Rust `upgrade` entrypoints are upgradeable. |
+
+### Intentional GMX-to-Soroban deviations
+
+| GMX Synthetics concept | SO4 Soroban implementation |
+|---|---|
+| EVM ERC-20 token interactions | SEP-41 token clients and Stellar Asset Contracts. |
+| Global Solidity data store for most structs | Handler-local persistent storage for deposits, withdrawals, orders, and positions; `data_store` remains for config, pool accounting, lists, and shared values. |
+| Oracle integration | Ledger-scoped keeper-submitted prices with ed25519 signature verification; test helpers are excluded from production builds. |
+| Router execution shape | Soroban-friendly multicall with explicit token-send actions before request creation. |
+| Execution fees | Contract support is present where implemented, but operator economics and production keeper compensation still need final deployment policy. |
+
+---
+
 ## Architecture
 
 ```
@@ -29,7 +65,8 @@ ExchangeRouter  ──► DepositHandler    ──► (mint LP tokens, update po
                 ──► LiquidationHandler
                 ──► AdlHandler
 
-All handlers read/write ──► DataStore  (universal key-value store)
+Handlers read/write ──► DataStore      (market config, pool accounting, lists)
+Requests/positions   ──► local storage (handler-owned persistent records)
 All handlers price via  ──► Oracle     (keeper-fed min/max price pairs)
 All handlers check      ──► RoleStore  (role-based access control)
 
@@ -41,7 +78,7 @@ Reader         ──► stateless views over DataStore (no writes)
 
 | Contract | Description |
 |---|---|
-| `data_store` | Universal typed key-value store. All protocol state lives here. |
+| `data_store` | Universal typed key-value store for market metadata, risk config, pool accounting, role-gated lists, and fee/accounting values. User requests and positions are stored locally in their handlers. |
 | `role_store` | Role-based access control — CONTROLLER, MARKET_KEEPER, ORDER_KEEPER, etc. |
 | `oracle` | Keeper-fed price store. Prices expire per ledger. Ed25519-verified. (Mainnet uses cryptographically signed prices only; test-only paths are excluded from production builds.) |
 | `market_token` | SEP-41 LP token deployed per market by `market_factory`. |
@@ -56,7 +93,7 @@ Reader         ──► stateless views over DataStore (no writes)
 | `adl_handler` | Auto-deleverages profitable positions when pool PnL exceeds threshold. |
 | `fee_handler` | Claims accumulated protocol fees and user funding fee credits. |
 | `referral_storage` | On-chain referral code registry with tier-based rebate/discount config. |
-| `reader` | Read-only aggregate views: positions, markets, OI, funding, liquidation checks. |
+| `reader` | Read-only aggregate views: positions, markets, OI, funding, liquidation checks. Stores only upgrade admin metadata. |
 | `exchange_router` | Single user entry point. Supports multicall for atomic multi-step actions. |
 
 ### Shared Libraries
@@ -779,12 +816,16 @@ ROLE_STORE=$(stellar contract deploy \
 DATA_STORE=$(stellar contract deploy \
   --wasm-hash $DATA_STORE_HASH \
   --source alice --network testnet \
-  -- initialize --role_store $ROLE_STORE)
+  -- initialize --admin $ALICE --role_store $ROLE_STORE)
 
 ORACLE=$(stellar contract deploy \
   --wasm-hash $ORACLE_HASH \
   --source alice --network testnet \
-  -- initialize --admin $ALICE --role_store $ROLE_STORE --data_store $DATA_STORE)
+  -- initialize \
+     --admin $ALICE \
+     --role_store $ROLE_STORE \
+     --data_store $DATA_STORE \
+     --network_passphrase "Test SDF Network ; September 2015")
 ```
 
 ### Step 5 — Deploy market factory
@@ -796,8 +837,13 @@ MARKET_FACTORY=$(stellar contract deploy \
   -- initialize \
      --admin $ALICE \
      --role_store $ROLE_STORE \
-     --data_store $DATA_STORE \
-     --market_token_wasm_hash $MARKET_TOKEN_HASH)
+     --data_store $DATA_STORE)
+
+stellar contract invoke --id $MARKET_FACTORY \
+  --source alice --network testnet \
+  -- set_market_token_wasm_hash \
+     --caller $ALICE \
+     --wasm_hash $MARKET_TOKEN_HASH
 ```
 
 ### Step 6 — Deploy vaults and handlers
@@ -885,10 +931,10 @@ REFERRAL_STORAGE=$(stellar contract deploy \
   --source alice --network testnet \
   -- initialize --admin $ALICE)
 
-# Reader is stateless — no initialize call needed
 READER=$(stellar contract deploy \
   --wasm-hash $READER_HASH \
-  --source alice --network testnet)
+  --source alice --network testnet \
+  -- initialize --admin $ALICE)
 ```
 
 ### Step 8 — Deploy exchange router
@@ -1040,6 +1086,22 @@ contracts/
     └── decrease_position_utils/  # position close/decrease logic
 ```
 
+### Quarantine Candidates
+
+The following directories currently sit under `libs/` but are **not** members of
+the Cargo workspace and are written against MultiversX APIs, not Soroban:
+
+| Directory | Status |
+|---|---|
+| `libs/deposit_flow` | Legacy/non-Soroban issue artifact. |
+| `libs/withdrawal_flow` | Legacy/non-Soroban issue artifact. |
+| `libs/position_list` | Legacy/non-Soroban issue artifact. |
+| `libs/storage_ttl` | Legacy/non-Soroban issue artifact. |
+
+Do not use these as implementation references for Soroban contracts. Either port
+the useful ideas into the active Soroban crates or move them to an archive in a
+dedicated cleanup PR.
+
 ---
 
 ## EVM → Soroban Reference
@@ -1084,7 +1146,7 @@ Every core contract designed to be upgradeable exposes an `upgrade(env, new_wasm
 
 > [!NOTE]
 > **Audit Finding (Code-vs-Doc Disconnect):**
-> While the operator workflows are structured to support broad upgrades, only **three execution handlers** actually implement the `upgrade` entrypoint in Rust. The remaining contracts (including core databases and vaults) are **functionally immutable**, which significantly reduces the key-compromise attack surface for the protocol.
+> The operator workflows can upload Wasm for any contract, but only contracts with a Rust `upgrade` entrypoint can be upgraded in place. Core databases and vaults remain functionally immutable, which significantly reduces the key-compromise attack surface for the protocol.
 
 | Contract | Upgradeable (in Rust Code) | Upgrade Authority | Notes |
 |---|---|---|---|
@@ -1101,10 +1163,10 @@ Every core contract designed to be upgradeable exposes an `upgrade(env, new_wasm
 | `order_handler` | ✅ Yes | local `admin` address | Trading engine (orders, positions, swaps). |
 | `liquidation_handler`| ✅ Yes | local `admin` address | Triggers forced position closing. |
 | `adl_handler` | ❌ Immutable | — | Fully immutable. |
-| `fee_handler` | ❌ Immutable | — | Fully immutable. |
-| `referral_storage` | ❌ Immutable | — | Fully immutable. |
-| `reader` | ❌ Immutable | — | Stateless view aggregation. |
-| `exchange_router` | ❌ Immutable | — | Single user entry point. |
+| `fee_handler` | ✅ Yes | local `admin` address | Fee claiming and UI-fee config. |
+| `referral_storage` | ✅ Yes | local `admin` address | Referral code and tier storage. |
+| `reader` | ✅ Yes | local `admin` address | View aggregation API. |
+| `exchange_router` | ✅ Yes | local `admin` address | Single user entry point. |
 
 **Upgrade workflow:**
 
@@ -1144,10 +1206,10 @@ This matrix maps every contract under `contracts/*` to its state ownership, init
 | `order_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `OrderVault`, `OrderStorageKey::Order(nonce)`, `PositionStorageKey::Position(key)` | `admin`, `role_store`, `data_store`, `oracle`, `order_vault` | `ORDER_KEEPER` for orders. `LIQUIDATION_KEEPER`/`ADL_KEEPER`/`CONTROLLER` for positions. | `order_vault`, `data_store`, `oracle`, `role_store`, libs | `ord_req`, `ord_exec`, `ord_fail`, `pos_update` | ✅ Upgradeable (Local Admin) |
 | `liquidation_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `OrderHandler` | `admin`, `role_store`, `data_store`, `oracle`, `order_handler` | `LIQUIDATION_KEEPER` role to liquidate. | `order_handler`, `data_store`, `oracle`, `role_store` | `liq_req` | ✅ Upgradeable (Local Admin) |
 | `adl_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `OrderHandler` | `admin`, `role_store`, `data_store`, `oracle`, `order_handler` | `ADL_KEEPER` role to execute ADL. | `order_handler`, `data_store`, `oracle`, `role_store` | `adl_req` | ❌ Immutable (Rust) |
-| `fee_handler` | `Admin`, `RoleStore`, `DataStore` | `admin`, `role_store`, `data_store` | `FEE_KEEPER` role to claim fees. | `data_store`, `role_store`, SEP-41 tokens | `fees_claimed` | ❌ Immutable (Rust) |
-| `referral_storage` | `Admin`, `ReferralKey::CodeOwner`, `ReferralKey::TraderCode`, `ReferralKey::ReferrerTier`, `ReferralKey::TierConfig` | `admin: Address` | `Admin` auth for configuring tiers. | None | `CodeRegistered`, `TraderCodeSet` | ❌ Immutable (Rust) |
-| `reader` | None (Stateless) | None | None (Public view-only) | `data_store`, `oracle` | None | ❌ Immutable (Rust) |
-| `exchange_router` | `Admin`, `RoleStore`, `DataStore`, `DepositHandler`, `WithdrawalHandler`, `OrderHandler` | `admin`, `role_store`, `data_store`, `deposit_handler`, `withdrawal_handler`, `order_handler` | None (Public user entry point) | `deposit_handler`, `withdrawal_handler`, `order_handler`, SEP-41 tokens | None | ❌ Immutable (Rust) |
+| `fee_handler` | `Admin`, `RoleStore`, `DataStore` | `admin`, `role_store`, `data_store` | `FEE_KEEPER` role to claim fees. | `data_store`, `role_store`, SEP-41 tokens | `fees_claimed` | ✅ Upgradeable (Local Admin) |
+| `referral_storage` | `Admin`, `ReferralKey::CodeOwner`, `ReferralKey::TraderCode`, `ReferralKey::ReferrerTier`, `ReferralKey::TierConfig` | `admin: Address` | `Admin` auth for configuring tiers. | None | `CodeRegistered`, `TraderCodeSet` | ✅ Upgradeable (Local Admin) |
+| `reader` | `Admin` | `admin: Address` | None for views; local admin for upgrade. | `data_store`, `oracle`, handler view clients | None | ✅ Upgradeable (Local Admin) |
+| `exchange_router` | `Admin`, `RoleStore`, `DataStore`, `DepositHandler`, `WithdrawalHandler`, `OrderHandler`, `FeeHandler`, pause flag | `admin`, `role_store`, `data_store`, `deposit_handler`, `withdrawal_handler`, `order_handler`, `fee_handler` | None for user entrypoints; local admin for pause/upgrade. | `deposit_handler`, `withdrawal_handler`, `order_handler`, `fee_handler`, SEP-41 tokens | None | ✅ Upgradeable (Local Admin) |
 
 ---
 
@@ -1193,6 +1255,7 @@ New contributors should read this before working on math, risk, or fee logic.
 SO4.market is being built in the open. All nine implementation phases are complete — the full protocol logic is live in Rust/Soroban. See the issue tracker for integration tests, optimisation tasks, and frontend work.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for deployment, upgrade workflow rules, and the PR checklist.
+For the post-issue-campaign cleanup map, see [docs/PROJECT_CLEANUP.md](docs/PROJECT_CLEANUP.md).
 
 ---
 

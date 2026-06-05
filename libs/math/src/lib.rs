@@ -25,7 +25,8 @@ pub fn mul_div(a: i128, b: i128, denominator: i128) -> i128 {
             // Decompose to avoid overflow: (a/d)*b + (a%d)*b/d
             let q = a / denominator;
             let r = a % denominator;
-            q.saturating_mul(b).saturating_add(r.saturating_mul(b) / denominator)
+            q.saturating_mul(b)
+                .saturating_add(r.saturating_mul(b) / denominator)
         }
     }
 }
@@ -42,7 +43,9 @@ pub fn mul_div_wide(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
     let product = a256.mul(&b256);
     let result = product.div(&d256);
     // Saturate to i128 bounds if result is too large (shouldn't happen in normal protocol use)
-    result.to_i128().unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
+    result
+        .to_i128()
+        .unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
 }
 
 /// (a × b) / denominator rounded UP (ceiling division) using I256.
@@ -58,14 +61,16 @@ pub fn mul_div_wide_up(env: &Env, a: i128, b: i128, denominator: i128) -> i128 {
     // ceiling division: (product + denominator - 1) / denominator
     // only applies when product > 0 to avoid rounding negative values upward
     let zero = I256::from_i128(env, 0);
-    let one  = I256::from_i128(env, 1);
+    let one = I256::from_i128(env, 1);
     let result = if product.cmp(&zero) == core::cmp::Ordering::Greater {
         let d_minus_one = d256.sub(&one);
         product.add(&d_minus_one).div(&d256)
     } else {
         product.div(&d256)
     };
-    result.to_i128().unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
+    result
+        .to_i128()
+        .unwrap_or(if a > 0 { i128::MAX } else { i128::MIN })
 }
 
 // ─── Factor helpers ───────────────────────────────────────────────────────────
@@ -176,20 +181,36 @@ pub fn pow_factor(env: &Env, value: i128, exponent: i128) -> i128 {
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 pub fn abs_safe(value: i128) -> i128 {
-    if value < 0 { value.saturating_neg() } else { value }
+    if value < 0 {
+        value.saturating_neg()
+    } else {
+        value
+    }
 }
 
 pub fn min(a: i128, b: i128) -> i128 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 pub fn max(a: i128, b: i128) -> i128 {
-    if a > b { a } else { b }
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 /// Clamp value to [0, ∞) — used for pool amounts that can't go negative.
 pub fn bound_above_zero(value: i128) -> i128 {
-    if value < 0 { 0 } else { value }
+    if value < 0 {
+        0
+    } else {
+        value
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -275,10 +296,13 @@ mod tests {
         let env = Env::default();
         // 10 × 1 / 3 = 3 remainder 1 → floor = 3, ceil = 4
         let floor = mul_div_wide(&env, 10, 1, 3);
-        let ceil  = mul_div_wide_up(&env, 10, 1, 3);
+        let ceil = mul_div_wide_up(&env, 10, 1, 3);
         assert_eq!(floor, 3);
-        assert_eq!(ceil,  4);
-        assert!(ceil > floor, "ceil must exceed floor when there is a remainder");
+        assert_eq!(ceil, 4);
+        assert!(
+            ceil > floor,
+            "ceil must exceed floor when there is a remainder"
+        );
     }
 
     /// Repeated small fees accumulate rather than leak when rounding up.
@@ -294,11 +318,11 @@ mod tests {
         let size = 33; // odd number ensures a remainder on most iterations
 
         let mut floor_total: i128 = 0;
-        let mut ceil_total:  i128 = 0;
+        let mut ceil_total: i128 = 0;
 
         for _ in 0..1_000 {
             floor_total += mul_div_wide(&env, size, fee_factor, fp);
-            ceil_total  += mul_div_wide_up(&env, size, fee_factor, fp);
+            ceil_total += mul_div_wide_up(&env, size, fee_factor, fp);
         }
 
         assert!(
@@ -315,10 +339,10 @@ mod tests {
         // −10 × 1 / 3 = −3 remainder −1 → both floor and ceil behave the same
         // (we only apply ceiling for positive fee amounts)
         let floor = mul_div_wide(&env, -10, 1, 3);
-        let ceil  = mul_div_wide_up(&env, -10, 1, 3);
+        let ceil = mul_div_wide_up(&env, -10, 1, 3);
         // Both should truncate toward zero (i.e. -3, not -4)
         assert_eq!(floor, -3);
-        assert_eq!(ceil,  -3);
+        assert_eq!(ceil, -3);
     }
 
     // ── Issue #136: property tests for math utilities ─────────────────────────
@@ -334,11 +358,15 @@ mod tests {
             (FLOAT_PRECISION, 3, FLOAT_PRECISION * 2),
             (10_000_000, FLOAT_PRECISION / 1_000, FLOAT_PRECISION),
             (i128::MAX / 2, 1, i128::MAX),
-            (1_000_000 * 10_000_000, FLOAT_PRECISION / 10_000, FLOAT_PRECISION),
+            (
+                1_000_000 * 10_000_000,
+                FLOAT_PRECISION / 10_000,
+                FLOAT_PRECISION,
+            ),
         ];
         for &(a, b, d) in cases {
             let floor = mul_div_wide(&env, a, b, d);
-            let ceil  = mul_div_wide_up(&env, a, b, d);
+            let ceil = mul_div_wide_up(&env, a, b, d);
             assert!(
                 ceil >= floor,
                 "ceil must be >= floor: a={a}, b={b}, d={d}, floor={floor}, ceil={ceil}"
@@ -353,10 +381,19 @@ mod tests {
         let env = Env::default();
         let b = FLOAT_PRECISION / 100; // 1%
         let d = FLOAT_PRECISION;
-        let steps: &[i128] = &[0, 1, 100, 10_000_000, FLOAT_PRECISION, FLOAT_PRECISION * 1_000];
+        let steps: &[i128] = &[
+            0,
+            1,
+            100,
+            10_000_000,
+            FLOAT_PRECISION,
+            FLOAT_PRECISION * 1_000,
+        ];
         for &a1 in steps {
             for &a2 in steps {
-                if a1 >= a2 { continue; }
+                if a1 >= a2 {
+                    continue;
+                }
                 let r1 = mul_div_wide(&env, a1, b, d);
                 let r2 = mul_div_wide(&env, a2, b, d);
                 assert!(
@@ -382,20 +419,41 @@ mod tests {
     fn property_apply_factor_zero_factor_returns_zero() {
         let values: &[i128] = &[0, 1, 10_000_000, FLOAT_PRECISION, i128::MAX / 2];
         for &v in values {
-            assert_eq!(apply_factor(v, 0), 0, "apply_factor(v, 0) must be 0 for v={v}");
+            assert_eq!(
+                apply_factor(v, 0),
+                0,
+                "apply_factor(v, 0) must be 0 for v={v}"
+            );
         }
     }
 
     /// integer_sqrt is monotone: a <= b implies sqrt(a) <= sqrt(b).
     #[test]
     fn property_integer_sqrt_monotone() {
-        let steps: &[i128] = &[0, 1, 2, 3, 4, 9, 16, 100, 10_000, 1_000_000, FLOAT_PRECISION];
+        let steps: &[i128] = &[
+            0,
+            1,
+            2,
+            3,
+            4,
+            9,
+            16,
+            100,
+            10_000,
+            1_000_000,
+            FLOAT_PRECISION,
+        ];
         for &a in steps {
             for &b in steps {
-                if a > b { continue; }
+                if a > b {
+                    continue;
+                }
                 let sa = integer_sqrt(a);
                 let sb = integer_sqrt(b);
-                assert!(sa <= sb, "sqrt not monotone: sqrt({a})={sa} > sqrt({b})={sb}");
+                assert!(
+                    sa <= sb,
+                    "sqrt not monotone: sqrt({a})={sa} > sqrt({b})={sb}"
+                );
             }
         }
     }
@@ -421,14 +479,10 @@ mod tests {
     /// This guards against overflow bugs that inflate results.
     #[test]
     fn property_mul_div_result_never_exceeds_naive_product() {
-        let cases: &[(i128, i128, i128)] = &[
-            (10, 20, 1),
-            (100, 200, 50),
-            (FLOAT_PRECISION, 2, 1),
-        ];
+        let cases: &[(i128, i128, i128)] = &[(10, 20, 1), (100, 200, 50), (FLOAT_PRECISION, 2, 1)];
         for &(a, b, d) in cases {
             let result = mul_div(a, b, d);
-            let naive  = a.saturating_mul(b);
+            let naive = a.saturating_mul(b);
             // result should be <= naive / d (we just check it doesn't exceed naive)
             assert!(
                 result <= naive,
@@ -443,9 +497,15 @@ mod tests {
         let cases: &[i128] = &[i128::MIN, -1_000_000, -1, 0, 1, 1_000_000, i128::MAX];
         for &v in cases {
             let result = bound_above_zero(v);
-            assert!(result >= 0, "bound_above_zero({v}) returned negative: {result}");
+            assert!(
+                result >= 0,
+                "bound_above_zero({v}) returned negative: {result}"
+            );
             if v >= 0 {
-                assert_eq!(result, v, "bound_above_zero must be identity for non-negative {v}");
+                assert_eq!(
+                    result, v,
+                    "bound_above_zero must be identity for non-negative {v}"
+                );
             } else {
                 assert_eq!(result, 0, "bound_above_zero must return 0 for negative {v}");
             }
@@ -470,7 +530,8 @@ mod tests {
         let xs: &[i128] = &[1, FLOAT_PRECISION / 2, FLOAT_PRECISION, FLOAT_PRECISION * 3];
         for &x in xs {
             assert_eq!(
-                pow_factor(&env, x, 0), FLOAT_PRECISION,
+                pow_factor(&env, x, 0),
+                FLOAT_PRECISION,
                 "pow_factor({x}, 0) must be FLOAT_PRECISION"
             );
         }
@@ -483,7 +544,8 @@ mod tests {
         let xs: &[i128] = &[FLOAT_PRECISION / 2, FLOAT_PRECISION, 2 * FLOAT_PRECISION];
         for &x in xs {
             assert_eq!(
-                pow_factor(&env, x, FLOAT_PRECISION), x,
+                pow_factor(&env, x, FLOAT_PRECISION),
+                x,
                 "pow_factor({x}, FP) must equal x"
             );
         }
