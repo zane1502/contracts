@@ -134,6 +134,13 @@ trait IFeeHandler {
     fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128);
 }
 
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "DataStoreClient")]
+trait IDataStore {
+    fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) -> Address;
+    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
+}
+
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -490,6 +497,29 @@ impl ExchangeRouter {
         }
     }
 
+    /// Set or revoke a position manager for the caller on a specific market.
+    ///
+    /// A position manager is authorized to create, increase, decrease, or close
+    /// positions on behalf of the owner, but cannot redirect collateral receipts.
+    /// The manager cannot override the receiver — funds always go to the owner.
+    ///
+    /// Call with zero_address to revoke an existing manager.
+    pub fn set_position_manager(env: Env, caller: Address, market: Address, manager: Address) {
+        caller.require_auth();
+        let data_store: Address = env.storage().instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        data_store_client.set_position_manager(&caller, &market, &manager);
+    }
+
+    /// Query the current position manager for an account on a specific market.
+    pub fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address> {
+        let data_store: Address = env.storage().instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let data_store_client = DataStoreClient::new(&env, &data_store);
+        data_store_client.get_position_manager(&owner, &market)
     /// Set the UI fee factor for a receiver. Delegates auth enforcement to fee_handler.
     pub fn set_ui_fee_factor(env: Env, ui_receiver: Address, factor: u128) {
         let fee_handler: Address = env
