@@ -19,16 +19,17 @@
 use gmx_decrease_position_utils::{decrease_position, DecreasePositionParams};
 use gmx_increase_position_utils::{increase_position, IncreasePositionParams};
 use gmx_keys::{
-    account_order_list_key, market_index_token_key, market_long_token_key, market_short_token_key,
-    order_key, order_list_key, roles,
+    account_order_list_key, keeper_heartbeat_timeout_key, last_keeper_activity_key,
+    market_index_token_key, market_long_token_key, market_short_token_key, order_key,
+    order_list_key, roles, DEFAULT_KEEPER_HEARTBEAT_TIMEOUT,
 };
 use gmx_swap_utils::swap_with_path;
 pub use gmx_types::CreateOrderParams;
 use gmx_types::PositionProps;
 use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    BytesN, Env,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, BytesN, Env,
 };
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -62,6 +63,9 @@ pub enum Error {
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral = 10,
+    /// `flag_stale_keeper` was called but the role's last activity is still
+    /// within the configured heartbeat timeout (issue #249).
+    KeeperNotStale = 11,
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -76,6 +80,7 @@ trait IRoleStore {
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
     fn increment_nonce(env: Env, caller: Address) -> u64;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
@@ -117,6 +122,21 @@ pub enum OrderStorageKey {
 // because DataStore supports only primitive/set types, not arbitrary structs.
 // DataStore holds only the index sets (order_list_key, account_order_list_key)
 // for enumeration. This matches the deposit and withdrawal handler patterns (issue #25).
+
+// ─── Events ───────────────────────────────────────────────────────────────────
+
+/// Emitted when a keeper role is found stale (issue #249): the gap between the
+/// current ledger and the role's last recorded activity has exceeded the
+/// configured heartbeat timeout. Signals the admin that the keeper has gone
+/// silent and its role can be revoked.
+#[contractevent(topics = ["kpr_stale"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeeperHeartbeatMissed {
+    pub role: BytesN<32>,
+    pub keeper: Address,
+    pub last_ledger: u64,
+    pub current_ledger: u64,
+}
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
 
@@ -179,6 +199,99 @@ impl OrderHandler {
             panic_with_error!(&env, Error::Unauthorized);
         }
         env.storage().instance().set(&InstanceKey::Oracle, &new_oracle);
+    }
+
+    /// Admin-configurable heartbeat timeout for a keeper `role`, in ledgers
+    /// (issue #249). When the gap since the role's last activity exceeds this,
+    /// the keeper is considered stale. Unset roles use
+    /// `DEFAULT_KEEPER_HEARTBEAT_TIMEOUT` (2880 ledgers, ~4h).
+    pub fn set_keeper_heartbeat_timeout(
+        env: Env,
+        caller: Address,
+        role: BytesN<32>,
+        timeout_ledgers: u64,
+    ) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let handler = env.current_contract_address();
+        DataStoreClient::new(&env, &data_store).set_u128(
+            &handler,
+            &keeper_heartbeat_timeout_key(&env, &role),
+            &(timeout_ledgers as u128),
+        );
+    }
+
+    /// Read a keeper role's liveness status from data_store (issue #249).
+    ///
+    /// View-only. Returns the last-active ledger, the gap since then, and whether
+    /// that gap has exceeded the configured heartbeat timeout. A role that has
+    /// never recorded activity reports `last_active_ledger = 0` and is treated as
+    /// stale (its full lifetime exceeds any timeout).
+    pub fn check_keeper_heartbeat(
+        env: Env,
+        data_store: Address,
+        role: BytesN<32>,
+    ) -> gmx_types::KeeperHeartbeatStatus {
+        let last_active_ledger = DataStoreClient::new(&env, &data_store)
+            .get_u128(&last_keeper_activity_key(&env, &role))
+            as u64;
+        let current_ledger = env.ledger().sequence() as u64;
+        let ledgers_since_last_activity = current_ledger.saturating_sub(last_active_ledger);
+        let timeout = keeper_heartbeat_timeout(&env, &data_store, &role);
+        let is_stale = ledgers_since_last_activity > timeout;
+        gmx_types::KeeperHeartbeatStatus {
+            last_active_ledger,
+            ledgers_since_last_activity,
+            is_stale,
+        }
+    }
+
+    /// Flag a keeper as stale (issue #249). Admin-gated.
+    ///
+    /// Verifies the `role`'s heartbeat has lapsed and emits `KeeperHeartbeatMissed`
+    /// so the staleness is recorded on-chain. The admin can then revoke the
+    /// keeper's role via `role_store::revoke_role` — which has no timelock, so the
+    /// replacement can be wired immediately. Panics with `KeeperNotStale` if the
+    /// role is still within its heartbeat window, preventing premature flagging.
+    pub fn flag_stale_keeper(env: Env, caller: Address, keeper: Address, role: BytesN<32>) {
+        caller.require_auth();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        if caller != admin {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
+        let status = Self::check_keeper_heartbeat(env.clone(), data_store.clone(), role.clone());
+        if !status.is_stale {
+            panic_with_error!(&env, Error::KeeperNotStale);
+        }
+
+        env.events().publish_event(&KeeperHeartbeatMissed {
+            role,
+            keeper,
+            last_ledger: status.last_active_ledger,
+            current_ledger: env.ledger().sequence() as u64,
+        });
     }
 
     /// Create a new order and record collateral in the order vault.
@@ -450,6 +563,11 @@ impl OrderHandler {
 
         // Remove order
         remove_order(&env, &data_store, &handler, &key, &order.account);
+
+        // Issue #249: record keeper liveness — stamp the ORDER_KEEPER role's last
+        // activity with the current ledger so the protocol has an on-chain
+        // heartbeat. The handler holds CONTROLLER, so it may write to data_store.
+        record_keeper_activity(&env, &data_store, &handler, &roles::order_keeper(&env));
 
         env.events()
             .publish((symbol_short!("ord_exe"),), (key, order.account));
@@ -793,6 +911,29 @@ fn remove_order(
     let ds = DataStoreClient::new(env, data_store);
     ds.remove_bytes32_from_set(caller, &order_list_key(env), key);
     ds.remove_bytes32_from_set(caller, &account_order_list_key(env, account), key);
+}
+
+/// Issue #249: stamp the current ledger sequence as `role`'s last activity.
+/// `caller` must hold CONTROLLER in data_store (the handler does).
+fn record_keeper_activity(env: &Env, data_store: &Address, caller: &Address, role: &BytesN<32>) {
+    let ledger = env.ledger().sequence() as u128;
+    DataStoreClient::new(env, data_store).set_u128(
+        caller,
+        &last_keeper_activity_key(env, role),
+        &ledger,
+    );
+}
+
+/// Read `role`'s configured heartbeat timeout, falling back to the default when
+/// unset (issue #249).
+fn keeper_heartbeat_timeout(env: &Env, data_store: &Address, role: &BytesN<32>) -> u64 {
+    let stored =
+        DataStoreClient::new(env, data_store).get_u128(&keeper_heartbeat_timeout_key(env, role));
+    if stored == 0 {
+        DEFAULT_KEEPER_HEARTBEAT_TIMEOUT
+    } else {
+        stored as u64
+    }
 }
 
 #[cfg(test)]
@@ -2200,5 +2341,135 @@ mod tests {
             &true,
             &0i128,
         );
+    }
+
+    // ── Issue #249: keeper heartbeat ──────────────────────────────────────────
+
+    /// Executing an order stamps the ORDER_KEEPER role's last activity at the
+    /// current ledger, and the heartbeat reads back as not-stale immediately after.
+    #[test]
+    fn execute_order_records_keeper_heartbeat() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        w.env.ledger().set_sequence_number(500);
+        let (hc, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        let status = hc.check_keeper_heartbeat(&w.ds, &roles::order_keeper(&w.env));
+        assert_eq!(status.last_active_ledger, 500);
+        assert_eq!(status.ledgers_since_last_activity, 0);
+        assert!(!status.is_stale, "keeper must be live right after executing");
+    }
+
+    /// Full lifecycle: keeper executes, time advances past the timeout, the
+    /// heartbeat reports stale, the admin flags it, and the role is revocable
+    /// immediately (no timelock).
+    #[test]
+    fn keeper_goes_stale_after_timeout_and_role_is_revocable() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        // Keeper executes at ledger 1000 → activity recorded.
+        w.env.ledger().set_sequence_number(1000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+        assert!(!hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+
+        // Advance past the default 2880-ledger timeout.
+        w.env.ledger().set_sequence_number(1000 + 2880 + 1);
+        let status = hc.check_keeper_heartbeat(&w.ds, &order_keeper_role);
+        assert_eq!(status.last_active_ledger, 1000);
+        assert!(status.is_stale, "keeper must be stale past the timeout");
+
+        // Admin flags the stale keeper (emits KeeperHeartbeatMissed).
+        hc.flag_stale_keeper(&w.admin, &w.keeper, &order_keeper_role);
+
+        // Role is revocable immediately — no timelock on revoke.
+        let rs_c = RsClient::new(&w.env, &w.rs);
+        assert!(rs_c.has_role(&w.keeper, &order_keeper_role));
+        rs_c.revoke_role(&w.admin, &w.keeper, &order_keeper_role);
+        assert!(
+            !rs_c.has_role(&w.keeper, &order_keeper_role),
+            "stale keeper's role must be revocable without waiting"
+        );
+    }
+
+    /// Admin-configured timeout overrides the default: a shorter window makes a
+    /// keeper stale sooner.
+    #[test]
+    fn custom_heartbeat_timeout_is_respected() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        // Tighten the timeout to 100 ledgers.
+        hc.set_keeper_heartbeat_timeout(&w.admin, &order_keeper_role, &100u64);
+
+        w.env.ledger().set_sequence_number(2000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        // 50 ledgers later — within the window.
+        w.env.ledger().set_sequence_number(2050);
+        assert!(!hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+
+        // 101 ledgers later — past the window.
+        w.env.ledger().set_sequence_number(2101);
+        assert!(hc
+            .check_keeper_heartbeat(&w.ds, &order_keeper_role)
+            .is_stale);
+    }
+
+    /// `flag_stale_keeper` must revert if the keeper is still within its window.
+    #[test]
+    #[should_panic]
+    fn flag_stale_keeper_reverts_when_keeper_is_live() {
+        let w = setup();
+        let fp = gmx_math::FLOAT_PRECISION;
+        set_prices(&w, 2_000 * fp);
+        seed_pool(&w);
+        set_prices(&w, 2_000 * fp);
+
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+
+        w.env.ledger().set_sequence_number(3000);
+        let (_, key) = create_increase_order(&w, OrderType::MarketIncrease, 0);
+        hc.execute_order(&w.keeper, &key);
+
+        // Still live → flagging must panic with KeeperNotStale.
+        hc.flag_stale_keeper(&w.admin, &w.keeper, &order_keeper_role);
+    }
+
+    /// Only the admin may flag a stale keeper.
+    #[test]
+    #[should_panic]
+    fn flag_stale_keeper_by_non_admin_panics() {
+        let w = setup();
+        let order_keeper_role = roles::order_keeper(&w.env);
+        let hc = OrderHandlerClient::new(&w.env, &w.ord_handler);
+        // Never recorded activity → stale, but caller is not admin.
+        w.env.ledger().set_sequence_number(5000);
+        let impostor = Address::generate(&w.env);
+        hc.flag_stale_keeper(&impostor, &w.keeper, &order_keeper_role);
     }
 }

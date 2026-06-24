@@ -594,6 +594,34 @@ pub fn keeper_public_key_prefix(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+/// sha256("LAST_KEEPER_ACTIVITY" ‖ role)
+///
+/// Ledger sequence of the most recent successful execution by a holder of
+/// `role`. Updated by handlers on every successful keeper action so the protocol
+/// has an on-chain liveness signal per keeper role (issue #249).
+pub fn last_keeper_activity_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LAST_KEEPER_ACTIVITY");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// sha256("KEEPER_HEARTBEAT_TIMEOUT" ‖ role)
+///
+/// Maximum number of ledgers a keeper `role` may go silent before it is
+/// considered stale. Admin-configured; falls back to
+/// `DEFAULT_KEEPER_HEARTBEAT_TIMEOUT` when unset (issue #249).
+pub fn keeper_heartbeat_timeout_key(env: &Env, role: &BytesN<32>) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "KEEPER_HEARTBEAT_TIMEOUT");
+    b.extend_from_array(&role.to_array());
+    sha256(env, &b)
+}
+
+/// Default keeper heartbeat timeout: 2880 ledgers (~4 hours at ~5s/ledger).
+/// Used when `keeper_heartbeat_timeout_key(role)` is unset in data_store.
+pub const DEFAULT_KEEPER_HEARTBEAT_TIMEOUT: u64 = 2880;
+
 /// Market token wasm hash (for factory to deploy LP tokens)
 pub fn market_token_wasm_hash_key(env: &Env) -> BytesN<32> {
     let mut b = Bytes::new(env);

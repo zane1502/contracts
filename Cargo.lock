@@ -1587,12 +1587,15 @@ dependencies = [
 name = "reader"
 version = "0.1.0"
 dependencies = [
+ "data-store",
  "gmx-keys",
  "gmx-market-utils",
  "gmx-math",
  "gmx-position-utils",
  "gmx-pricing-utils",
  "gmx-types",
+ "oracle",
+ "role-store",
  "soroban-sdk",
 ]
 

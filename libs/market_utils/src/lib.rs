@@ -646,12 +646,8 @@ mod tests {
         long_token: &Address,
         short_token: &Address,
     ) -> MarketProps {
-        MarketProps {
-            market_token: market_token.clone(),
-            index_token: index_token.clone(),
-            long_token: long_token.clone(),
-            short_token: short_token.clone(),
-        }
+        // Issue #248: build via the shared constructor instead of a per-field literal.
+        MarketProps::new(market_token, index_token, long_token, short_token)
     }
 
     #[test]

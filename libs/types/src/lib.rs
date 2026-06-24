@@ -52,6 +52,32 @@ pub struct MarketProps {
     pub short_token: Address,
 }
 
+impl MarketProps {
+    /// Construct a `MarketProps` from borrowed addresses.
+    ///
+    /// Issue #248: `MarketProps` carries only `Address` fields, every one of which
+    /// is required and has no meaningful zero value (Soroban `Address` cannot be
+    /// constructed without an `Env`, so a `Default` impl is not possible). The
+    /// per-field struct literal — repeated verbatim across handlers, libs, and
+    /// every test — is the actual boilerplate. This constructor collapses that
+    /// six-line literal into a single call and clones internally so callers keep
+    /// ownership of their addresses, which is the common case when the same
+    /// addresses are reused to build other structs in the same scope.
+    pub fn new(
+        market_token: &Address,
+        index_token: &Address,
+        long_token: &Address,
+        short_token: &Address,
+    ) -> Self {
+        Self {
+            market_token: market_token.clone(),
+            index_token: index_token.clone(),
+            long_token: long_token.clone(),
+            short_token: short_token.clone(),
+        }
+    }
+}
+
 // ─── Position ────────────────────────────────────────────────────────────────
 
 /// Mirrors GMX's Position.Props.
@@ -237,6 +263,36 @@ pub struct DecreasePositionResult {
     pub secondary_output_amount: i128, // optional second token (e.g. from swap-on-close)
     pub remaining_collateral: i128,    // collateral left in position after fees & pnl
     pub is_fully_closed: bool,
+}
+
+/// Aggregated protocol-wide statistics across a set of markets (returned by Reader).
+///
+/// Issue #251: lets the frontend fetch headline numbers (TVL, OI, accumulated
+/// fees) in a single call instead of N per-market round-trips. All USD figures
+/// use 30-decimal FLOAT_PRECISION and reflect the oracle prices at the ledger
+/// in which the call executes — the result is a snapshot, valid only for
+/// `computed_at_ledger`.
+#[contracttype]
+pub struct ProtocolStats {
+    pub total_pool_value_usd: i128,       // sum of get_pool_value across all markets
+    pub total_long_open_interest_usd: i128,
+    pub total_short_open_interest_usd: i128,
+    pub total_accumulated_fees_usd: i128, // sum of unclaimed fee balances, in USD
+    pub market_count: u32,                // number of markets aggregated
+    pub computed_at_ledger: u64,          // ledger sequence the snapshot was taken at
+}
+
+/// Liveness status for a keeper role (issue #249), returned by Reader.
+///
+/// A keeper that has gone permanently offline leaves orders unexecuted. This
+/// gives the admin an on-chain signal: when `is_stale` is true the gap since the
+/// last successful execution has exceeded the configured heartbeat timeout, and
+/// the keeper's role can be revoked.
+#[contracttype]
+pub struct KeeperHeartbeatStatus {
+    pub last_active_ledger: u64,
+    pub ledgers_since_last_activity: u64,
+    pub is_stale: bool, // gap > keeper_heartbeat_timeout(role)
 }
 
 /// Rich position info including computed PnL and fees (returned by Reader).
